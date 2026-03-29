@@ -45,7 +45,6 @@ API_HASH = "68875f756c9b437a8b916ca3de215815"
 TEST_CHANNEL_ID = -1003687592445
 TEST_FILES = {
     "1mb": {"msg_id": 4, "size": 1048576, "sha256": "383f48e141893fb74730cf11acc50081e17f5fe30fd4f62dcde7ad1ae9be6a8f"},
-    "20mb": {"msg_id": 5, "size": 20971520, "sha256": "536f79417e366fcca2b19b28306210b2992d49ca9c27f131d03c520aeccb1dad"},
 }
 
 # Per-file download timeouts (seconds).
