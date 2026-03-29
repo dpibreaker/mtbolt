@@ -18,3 +18,4 @@ fuzz/timeout-*
 !TESTING.md
 tests/regenerate_*.py
 tests/seed_test_media.py
+tests/create_session.py

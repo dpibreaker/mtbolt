@@ -13,7 +13,7 @@ Uses ONE client per transport mode to avoid AuthKeyDuplicatedError from
 Telegram seeing multiple connections with the same auth key.
 
 Requires the TG_STRING_SESSION environment variable (Telethon StringSession).
-Skips gracefully when the secret is absent (fork PRs, external contributors).
+The CI job skips entirely on fork PRs (no secrets available).
 
 Usage:
     TG_STRING_SESSION=... TELEPROXY_SECRET=... python3 tests/test_direct_e2e.py
@@ -300,8 +300,8 @@ async def test_faketls_all(host, port, secret, domain, session_str):
 def main():
     session_str = os.environ.get("TG_STRING_SESSION", "")
     if not session_str:
-        print("SKIP: TG_STRING_SESSION not set (secrets not available)")
-        sys.exit(0)
+        print("ERROR: TG_STRING_SESSION not set")
+        sys.exit(1)
 
     secret = os.environ.get("TELEPROXY_SECRET", "")
     if not secret:
