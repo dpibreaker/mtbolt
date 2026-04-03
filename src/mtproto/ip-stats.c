@@ -1,8 +1,9 @@
 /*
  *  ip-stats.c — Per-IP connection tracking and GeoIP country metrics
  *
- *  Hash table: open addressing, power-of-2 size, linear probing.
- *  GeoIP: optional libmaxminddb integration for country-level counters.
+ *  Shared-memory hash table for multi-worker mode.
+ *  Uses mmap(MAP_SHARED) + atomic CAS/add for lock-free operation.
+ *  GeoIP: optional libmaxminddb for country/city/coordinates.
  */
 
 #include <assert.h>
@@ -10,6 +11,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <arpa/inet.h>
+#include <sys/mman.h>
 
 #include "ip-stats.h"
 #include "kprintf.h"
@@ -18,96 +20,79 @@
 #include <maxminddb.h>
 #endif
 
-/* ---- IP hash table ---- */
+/* ---- Shared memory hash table ---- */
 
-#define IP_HT_INITIAL_SIZE  (1 << 18)   /* 256K slots, ~3MB */
-#define IP_HT_MAX_SIZE      (1 << 24)   /* 16M slots */
-#define IP_HT_LOAD_FACTOR   70          /* resize at 70% */
+/* Fixed size — mmap pages are lazy, only touched pages consume RAM.
+   4M slots × 104 bytes = 416MB virtual, but real RSS only for used slots. */
+#define IP_HT_SIZE       (1 << 22)   /* 4M slots */
+#define IP_HT_MASK       (IP_HT_SIZE - 1)
 
 struct ip_ht_slot {
-  uint32_t ip;        /* 0 = empty */
-  int active_conns;
+  uint32_t ip;        /* 0 = empty, set via CAS */
+  int active_conns;   /* modified via atomic add */
   long long total_conns;
-  /* cached geo — populated once on first connect, never re-looked-up */
+  /* cached geo — populated once on first connect */
   char cc[4];
   char city[64];
   double latitude;
   double longitude;
 };
 
-static struct ip_ht_slot *ip_ht;
-static int ip_ht_size;
-static int ip_ht_mask;
-static int ip_ht_used;       /* slots with ip != 0 */
+/* Shared state — lives in mmap(MAP_SHARED) */
+struct ip_stats_shared {
+  int used;  /* approximate, not exact under concurrency */
+  struct ip_ht_slot ht[IP_HT_SIZE];
+};
+
+struct country_stats_shared {
+  int count;
+  struct country_stats_entry entries[256];
+};
+
+static struct ip_stats_shared *shared;
+static struct country_stats_shared *countries_shared;
 
 static inline int ip_ht_hash (uint32_t ip) {
-  /* fast mix */
   uint32_t h = ip;
   h ^= h >> 16;
   h *= 0x45d9f3b;
   h ^= h >> 16;
-  return h & ip_ht_mask;
+  return h & IP_HT_MASK;
 }
 
 static struct ip_ht_slot *ip_ht_find (uint32_t ip) {
   int idx = ip_ht_hash (ip);
   for (;;) {
-    struct ip_ht_slot *s = &ip_ht[idx];
-    if (s->ip == ip) return s;
-    if (s->ip == 0) return s;
-    idx = (idx + 1) & ip_ht_mask;
-  }
-}
-
-static void ip_ht_resize (int new_size) {
-  struct ip_ht_slot *new_ht = calloc (new_size, sizeof (struct ip_ht_slot));
-  if (!new_ht) {
-    vkprintf (0, "ip_stats: failed to resize hash table to %d slots, keeping old\n", new_size);
-    return;  /* keep old table */
-  }
-
-  struct ip_ht_slot *old = ip_ht;
-  int old_size = ip_ht_size;
-
-  ip_ht = new_ht;
-  ip_ht_size = new_size;
-  ip_ht_mask = new_size - 1;
-  ip_ht_used = 0;
-
-  if (old) {
-    for (int i = 0; i < old_size; i++) {
-      if (old[i].ip != 0) {
-        struct ip_ht_slot *s = ip_ht_find (old[i].ip);
-        *s = old[i];
-        ip_ht_used++;
-      }
-    }
-    free (old);
+    struct ip_ht_slot *s = &shared->ht[idx];
+    uint32_t cur = s->ip;
+    if (cur == ip) return s;
+    if (cur == 0) return s;
+    idx = (idx + 1) & IP_HT_MASK;
   }
 }
 
 /* ---- Country tracking ---- */
 
-#define MAX_COUNTRIES 256
-
-static struct country_stats_entry countries[MAX_COUNTRIES];
-static int country_count;
-
 static struct country_stats_entry *country_find_or_create (const char *code) {
-  for (int i = 0; i < country_count; i++) {
-    if (countries[i].code[0] == code[0] && countries[i].code[1] == code[1]) {
-      return &countries[i];
+  struct country_stats_shared *cs = countries_shared;
+  for (int i = 0; i < cs->count; i++) {
+    if (cs->entries[i].code[0] == code[0] && cs->entries[i].code[1] == code[1]) {
+      return &cs->entries[i];
     }
   }
-  if (country_count >= MAX_COUNTRIES) {
+  if (cs->count >= 256) {
     return NULL;
   }
-  struct country_stats_entry *e = &countries[country_count++];
+  /* Atomically claim next slot */
+  int idx = __sync_fetch_and_add (&cs->count, 1);
+  if (idx >= 256) {
+    __sync_fetch_and_add (&cs->count, -1);
+    return NULL;
+  }
+  struct country_stats_entry *e = &cs->entries[idx];
   e->code[0] = code[0];
   e->code[1] = code[1];
   e->code[2] = 0;
-  e->unique_ips = 0;
-  e->total_ips = 0;
   return e;
 }
 
@@ -150,7 +135,6 @@ static struct geoip_result geoip_lookup (uint32_t ip) {
     r.cc[2] = 0;
   }
 
-  /* Get coordinates from location */
   status = MMDB_get_value (&result.entry, &data, "location", "latitude", NULL);
   if (status == MMDB_SUCCESS && data.has_data && data.type == MMDB_DATA_TYPE_DOUBLE) {
     r.latitude = data.double_value;
@@ -160,7 +144,6 @@ static struct geoip_result geoip_lookup (uint32_t ip) {
     r.longitude = data.double_value;
   }
 
-  /* City name (English) */
   status = MMDB_get_value (&result.entry, &data, "city", "names", "en", NULL);
   if (status == MMDB_SUCCESS && data.has_data && data.type == MMDB_DATA_TYPE_UTF8_STRING && data.data_size > 0) {
     int len = data.data_size < 63 ? data.data_size : 63;
@@ -176,10 +159,23 @@ static struct geoip_result geoip_lookup (uint32_t ip) {
 /* ---- Public API ---- */
 
 void ip_stats_init (void) {
-  ip_ht_resize (IP_HT_INITIAL_SIZE);
-  country_count = 0;
-  memset (countries, 0, sizeof (countries));
-  vkprintf (1, "ip_stats: initialized with %d slots\n", ip_ht_size);
+  /* mmap shared anonymous — survives fork, all workers see same data */
+  shared = mmap (NULL, sizeof (struct ip_stats_shared),
+                 PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (shared == MAP_FAILED) {
+    kprintf ("ip_stats: mmap failed for hash table\n");
+    exit (1);
+  }
+
+  countries_shared = mmap (NULL, sizeof (struct country_stats_shared),
+                           PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (countries_shared == MAP_FAILED) {
+    kprintf ("ip_stats: mmap failed for countries\n");
+    exit (1);
+  }
+
+  kprintf ("ip_stats: shared hash table %d slots (%ld MB virtual)\n",
+           IP_HT_SIZE, (long) sizeof (struct ip_stats_shared) / (1024 * 1024));
 }
 
 int ip_stats_geoip_load (const char *mmdb_path) {
@@ -202,37 +198,52 @@ int ip_stats_geoip_load (const char *mmdb_path) {
 }
 
 void ip_stats_connect (uint32_t ip) {
-  if (!ip) return;
-
-  /* Resize if needed */
-  if (ip_ht_used * 100 / ip_ht_size >= IP_HT_LOAD_FACTOR && ip_ht_size < IP_HT_MAX_SIZE) {
-    ip_ht_resize (ip_ht_size * 2);
-  }
+  if (!ip || !shared) return;
 
   struct ip_ht_slot *s = ip_ht_find (ip);
-  int is_new_ip = (s->ip == 0);
-  int was_inactive = (s->active_conns == 0);
-  if (is_new_ip) {
-    s->ip = ip;
-    ip_ht_used++;
-    /* Cache geo once per IP — never re-lookup */
-    struct geoip_result geo = geoip_lookup (ip);
-    memcpy (s->cc, geo.cc, 4);
-    memcpy (s->city, geo.city, 64);
-    s->latitude = geo.latitude;
-    s->longitude = geo.longitude;
-  }
-  s->active_conns++;
-  s->total_conns++;
+  int is_new_ip = 0;
 
-  /* Country tracking — use cached cc from slot */
+  if (s->ip == 0) {
+    /* Try to claim this slot atomically */
+    uint32_t old = __sync_val_compare_and_swap (&s->ip, 0, ip);
+    if (old == 0) {
+      /* We claimed it — populate geo cache */
+      is_new_ip = 1;
+      __sync_fetch_and_add (&shared->used, 1);
+      struct geoip_result geo = geoip_lookup (ip);
+      memcpy (s->cc, geo.cc, 4);
+      memcpy (s->city, geo.city, 64);
+      s->latitude = geo.latitude;
+      s->longitude = geo.longitude;
+    } else if (old != ip) {
+      /* Someone else claimed it with different IP — re-find */
+      s = ip_ht_find (ip);
+      if (s->ip == 0) {
+        old = __sync_val_compare_and_swap (&s->ip, 0, ip);
+        if (old == 0) {
+          is_new_ip = 1;
+          __sync_fetch_and_add (&shared->used, 1);
+          struct geoip_result geo = geoip_lookup (ip);
+          memcpy (s->cc, geo.cc, 4);
+          memcpy (s->city, geo.city, 64);
+          s->latitude = geo.latitude;
+          s->longitude = geo.longitude;
+        }
+      }
+    }
+  }
+
+  int was_inactive = (__sync_fetch_and_add (&s->active_conns, 1) == 0);
+  __sync_fetch_and_add (&s->total_conns, 1);
+
+  /* Country tracking */
   struct country_stats_entry *ce = country_find_or_create (s->cc);
   if (ce) {
     if (was_inactive) {
-      ce->unique_ips++;
+      __sync_fetch_and_add (&ce->unique_ips, 1);
     }
     if (is_new_ip) {
-      ce->total_ips++;
+      __sync_fetch_and_add (&ce->total_ips, 1);
     }
     if (ce->latitude == 0 && ce->longitude == 0 && (s->latitude != 0 || s->longitude != 0)) {
       ce->latitude = s->latitude;
@@ -242,57 +253,53 @@ void ip_stats_connect (uint32_t ip) {
 }
 
 void ip_stats_disconnect (uint32_t ip) {
-  if (!ip) return;
+  if (!ip || !shared) return;
 
   struct ip_ht_slot *s = ip_ht_find (ip);
   if (s->ip == 0) return;
 
-  if (s->active_conns > 0) {
-    s->active_conns--;
-    if (s->active_conns == 0) {
-      /* IP no longer active — use cached cc, no geoip re-lookup */
-      struct country_stats_entry *ce = country_find_or_create (s->cc);
-      if (ce && ce->unique_ips > 0) {
-        ce->unique_ips--;
-      }
+  int old_active = __sync_fetch_and_add (&s->active_conns, -1);
+  if (old_active == 1) {
+    /* Was 1, now 0 — IP no longer active */
+    struct country_stats_entry *ce = country_find_or_create (s->cc);
+    if (ce && ce->unique_ips > 0) {
+      __sync_fetch_and_add (&ce->unique_ips, -1);
     }
+  }
+  if (old_active <= 0) {
+    /* Underflow guard */
+    __sync_val_compare_and_swap (&s->active_conns, old_active - 1, 0);
   }
 }
 
 int ip_stats_count (void) {
-  return ip_ht_used;
+  return shared ? shared->used : 0;
 }
 
 /* ---- Prometheus output ---- */
 
-/* Helper for sorting top-N by active_conns (descending) */
-static int cmp_active_desc (const void *a, const void *b) {
-  const struct ip_ht_slot *sa = a, *sb = b;
-  if (sa->active_conns != sb->active_conns) {
-    return (sb->active_conns > sa->active_conns) ? 1 : -1;
-  }
-  return 0;
-}
-
 void ip_stats_prometheus (stats_buffer_t *sb, int top_n) {
-  /* Country metrics — unique IPs with lat/lon for geomap */
-  if (country_count > 0) {
+  if (!shared || !countries_shared) return;
+
+  /* Country metrics */
+  struct country_stats_shared *cs = countries_shared;
+  if (cs->count > 0) {
     sb_printf (sb,
       "# HELP teleproxy_country_unique_ips Currently active unique IPs by country.\n"
       "# TYPE teleproxy_country_unique_ips gauge\n");
-    for (int i = 0; i < country_count; i++) {
-      if (countries[i].unique_ips > 0) {
+    for (int i = 0; i < cs->count && i < 256; i++) {
+      if (cs->entries[i].unique_ips > 0) {
         sb_printf (sb, "teleproxy_country_unique_ips{country=\"%s\",latitude=\"%.4f\",longitude=\"%.4f\"} %d\n",
-          countries[i].code, countries[i].latitude, countries[i].longitude, countries[i].unique_ips);
+          cs->entries[i].code, cs->entries[i].latitude, cs->entries[i].longitude, cs->entries[i].unique_ips);
       }
     }
     sb_printf (sb,
       "# HELP teleproxy_country_total_ips All-time unique IPs seen by country.\n"
       "# TYPE teleproxy_country_total_ips counter\n");
-    for (int i = 0; i < country_count; i++) {
-      if (countries[i].total_ips > 0) {
+    for (int i = 0; i < cs->count && i < 256; i++) {
+      if (cs->entries[i].total_ips > 0) {
         sb_printf (sb, "teleproxy_country_total_ips{country=\"%s\"} %lld\n",
-          countries[i].code, countries[i].total_ips);
+          cs->entries[i].code, cs->entries[i].total_ips);
       }
     }
   }
@@ -301,25 +308,23 @@ void ip_stats_prometheus (stats_buffer_t *sb, int top_n) {
   sb_printf (sb,
     "# HELP teleproxy_unique_ips Total unique IPs tracked.\n"
     "# TYPE teleproxy_unique_ips gauge\n"
-    "teleproxy_unique_ips %d\n", ip_ht_used);
+    "teleproxy_unique_ips %d\n", shared->used);
 
-  /* All active IPs with geo data — for geomap */
-  if (ip_ht_used == 0) return;
-
-  (void) top_n; /* emit all active IPs */
+  /* All active IPs with geo data */
+  (void) top_n;
 
   sb_printf (sb,
     "# HELP teleproxy_client Active client IPs with geo coordinates.\n"
     "# TYPE teleproxy_client gauge\n");
 
-  for (int i = 0; i < ip_ht_size; i++) {
-    if (ip_ht[i].ip == 0 || ip_ht[i].active_conns <= 0) continue;
+  for (int i = 0; i < IP_HT_SIZE; i++) {
+    struct ip_ht_slot *s = &shared->ht[i];
+    if (s->ip == 0 || s->active_conns <= 0) continue;
     struct in_addr addr;
-    addr.s_addr = htonl (ip_ht[i].ip);
+    addr.s_addr = htonl (s->ip);
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop (AF_INET, &addr, ip_str, sizeof (ip_str));
-    /* Use cached geo from slot — zero MMDB lookups on scrape */
     sb_printf (sb, "teleproxy_client{ip=\"%s\",country=\"%s\",city=\"%s\",latitude=\"%.4f\",longitude=\"%.4f\"} %d\n",
-      ip_str, ip_ht[i].cc, ip_ht[i].city, ip_ht[i].latitude, ip_ht[i].longitude, ip_ht[i].active_conns);
+      ip_str, s->cc, s->city, s->latitude, s->longitude, s->active_conns);
   }
 }
