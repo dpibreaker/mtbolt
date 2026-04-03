@@ -222,7 +222,10 @@ void ext_connection_table_init (void) {
     ext_conn_table_size = MAX_CONNECTIONS;
   }
   ExtConnectionHead = calloc (ext_conn_table_size, sizeof (struct ext_connection));
-  assert (ExtConnectionHead && "failed to allocate ExtConnectionHead");
+  if (!ExtConnectionHead) {
+    kprintf("FATAL: failed to allocate ext_connection table for %d connections\n", ext_conn_table_size);
+    exit(1);
+  }
   kprintf ("Allocated ext_connection table for %d connections (%ld bytes)\n",
            ext_conn_table_size,
            (long) ext_conn_table_size * (long) sizeof (struct ext_connection));
@@ -2464,7 +2467,7 @@ static struct toml_config toml_cfg;
 void mtfront_pre_loop (void) {
   int i, enable_ipv6 = (ipv6_enabled && !engine_state->settings_addr.s_addr) ? SM_IPV6 : 0;
   if (domain_count == 0) {
-    tcp_maximize_buffers = 1;
+    tcp_maximize_buffers = 0;  /* let kernel autoscale via tcp_rmem/tcp_wmem */
     if (window_clamp == 0) {
       window_clamp = DEFAULT_WINDOW_CLAMP;
     }

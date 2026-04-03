@@ -637,6 +637,10 @@ int server_socket (int port, struct in_addr in_addr, int backlog, int mode) {
     int defer = 3;
     setsockopt (socket_fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof (defer));
   }
+  if (!(mode & SM_UDP)) {
+    int qlen = 256;
+    setsockopt(socket_fd, IPPROTO_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen));
+  }
   return socket_fd;
 }
 

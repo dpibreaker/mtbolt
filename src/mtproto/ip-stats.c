@@ -28,6 +28,11 @@ struct ip_ht_slot {
   uint32_t ip;        /* 0 = empty */
   int active_conns;
   long long total_conns;
+  /* cached geo — populated once on first connect, never re-looked-up */
+  char cc[4];
+  char city[64];
+  double latitude;
+  double longitude;
 };
 
 static struct ip_ht_slot *ip_ht;
@@ -55,11 +60,16 @@ static struct ip_ht_slot *ip_ht_find (uint32_t ip) {
 }
 
 static void ip_ht_resize (int new_size) {
+  struct ip_ht_slot *new_ht = calloc (new_size, sizeof (struct ip_ht_slot));
+  if (!new_ht) {
+    vkprintf (0, "ip_stats: failed to resize hash table to %d slots, keeping old\n", new_size);
+    return;  /* keep old table */
+  }
+
   struct ip_ht_slot *old = ip_ht;
   int old_size = ip_ht_size;
 
-  ip_ht = calloc (new_size, sizeof (struct ip_ht_slot));
-  assert (ip_ht);
+  ip_ht = new_ht;
   ip_ht_size = new_size;
   ip_ht_mask = new_size - 1;
   ip_ht_used = 0;
@@ -205,23 +215,28 @@ void ip_stats_connect (uint32_t ip) {
   if (is_new_ip) {
     s->ip = ip;
     ip_ht_used++;
+    /* Cache geo once per IP — never re-lookup */
+    struct geoip_result geo = geoip_lookup (ip);
+    memcpy (s->cc, geo.cc, 4);
+    memcpy (s->city, geo.city, 64);
+    s->latitude = geo.latitude;
+    s->longitude = geo.longitude;
   }
   s->active_conns++;
   s->total_conns++;
 
-  /* Country tracking — count unique IPs, not connections */
-  struct geoip_result geo = geoip_lookup (ip);
-  struct country_stats_entry *ce = country_find_or_create (geo.cc);
+  /* Country tracking — use cached cc from slot */
+  struct country_stats_entry *ce = country_find_or_create (s->cc);
   if (ce) {
     if (was_inactive) {
-      ce->unique_ips++;  /* this IP just became active */
+      ce->unique_ips++;
     }
     if (is_new_ip) {
-      ce->total_ips++;   /* never seen this IP before */
+      ce->total_ips++;
     }
-    if (ce->latitude == 0 && ce->longitude == 0 && (geo.latitude != 0 || geo.longitude != 0)) {
-      ce->latitude = geo.latitude;
-      ce->longitude = geo.longitude;
+    if (ce->latitude == 0 && ce->longitude == 0 && (s->latitude != 0 || s->longitude != 0)) {
+      ce->latitude = s->latitude;
+      ce->longitude = s->longitude;
     }
   }
 }
@@ -235,9 +250,8 @@ void ip_stats_disconnect (uint32_t ip) {
   if (s->active_conns > 0) {
     s->active_conns--;
     if (s->active_conns == 0) {
-      /* IP no longer active — decrement country unique_ips */
-      struct geoip_result geo = geoip_lookup (ip);
-      struct country_stats_entry *ce = country_find_or_create (geo.cc);
+      /* IP no longer active — use cached cc, no geoip re-lookup */
+      struct country_stats_entry *ce = country_find_or_create (s->cc);
       if (ce && ce->unique_ips > 0) {
         ce->unique_ips--;
       }
@@ -304,8 +318,8 @@ void ip_stats_prometheus (stats_buffer_t *sb, int top_n) {
     addr.s_addr = htonl (ip_ht[i].ip);
     char ip_str[INET_ADDRSTRLEN];
     inet_ntop (AF_INET, &addr, ip_str, sizeof (ip_str));
-    struct geoip_result geo = geoip_lookup (ip_ht[i].ip);
+    /* Use cached geo from slot — zero MMDB lookups on scrape */
     sb_printf (sb, "teleproxy_client{ip=\"%s\",country=\"%s\",city=\"%s\",latitude=\"%.4f\",longitude=\"%.4f\"} %d\n",
-      ip_str, geo.cc, geo.city, geo.latitude, geo.longitude, ip_ht[i].active_conns);
+      ip_str, ip_ht[i].cc, ip_ht[i].city, ip_ht[i].latitude, ip_ht[i].longitude, ip_ht[i].active_conns);
   }
 }

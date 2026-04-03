@@ -33,7 +33,7 @@
 
 #define	MSG_BUFFERS_CHUNK_SIZE	((1L << 21) - 64)
 
-#define MSG_DEFAULT_MAX_ALLOCATED_BYTES	(6L * 1024 * 1024 * 1024)  /* 6GB — leaves room for OS + kernel TCP on 16GB box */
+#define MSG_DEFAULT_MAX_ALLOCATED_BYTES	(16L * 1024 * 1024 * 1024)  /* 16GB — 32GB box */
 
 #ifdef _LP64
 #define MSG_MAX_ALLOCATED_BYTES	(1L << 40)
