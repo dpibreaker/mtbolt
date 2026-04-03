@@ -473,7 +473,7 @@ struct msg_buffer *alloc_msg_buffer_internal (struct msg_buffer *neighbor, struc
 
   assert (C != CH);
   unlock_chunk (C);
-  //-- CH->free_buffers;
+  -- CH->free_buffers;
 
   i -= two_power;
   vkprintf (3, "alloc_msg_buffer(%d) [chunk %p, size %d]: tot_buffers = %d, free_buffers = %d\n", i, C, C->buffer_size, CH->tot_buffers, CH->free_buffers);
@@ -521,14 +521,10 @@ int free_std_msg_buffer (struct msg_buffers_chunk *C, struct msg_buffer *X) {
 
   X->magic = MSG_BUFFER_FREE_MAGIC;
   X->refcnt = -0x40000000;
-  //++ C->ch_head->free_buffers;
+  ++ C->ch_head->free_buffers;
   
   MODULE_STAT->total_used_buffers --;
   MODULE_STAT->total_used_buffers_size -= C->buffer_size;
-
-  //if (C->free_cnt[1] == C->tot_buffers && C->ch_head->free_buffers * 4 >= C->tot_buffers * 5) {
-  //  free_msg_buffers_chunk (C);
-  //}
 
   return 1;
 }
