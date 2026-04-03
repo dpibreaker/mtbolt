@@ -1518,8 +1518,14 @@ static int tcp_rpcs_ext_drs_alarm (connection_job_t C) {
   }
 
   /* Handshake timeout (pre-handshake state) */
-  if (D->in_packet_num == -3 && default_domain_info != NULL) {
-    return proxy_connection (C, default_domain_info);
+  if (D->in_packet_num == -3) {
+    if (default_domain_info != NULL) {
+      return proxy_connection (C, default_domain_info);
+    }
+    /* No TLS domain configured — close idle connection that never completed handshake */
+    vkprintf (2, "closing idle connection %d: no handshake after timeout\n", c->fd);
+    fail_connection (C, -1);
+    return 0;
   }
 
   /* DRS delay resume: timer fired, process next record */
@@ -1534,7 +1540,7 @@ static int tcp_rpcs_ext_drs_alarm (connection_job_t C) {
 }
 
 int tcp_rpcs_ext_init_accepted (connection_job_t C) {
-  job_timer_insert (C, precise_now + 10);
+  job_timer_insert (C, precise_now + 5);  /* 5s handshake timeout */
   return tcp_rpcs_init_accepted_nohs (C);
 }
 
