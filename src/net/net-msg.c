@@ -97,12 +97,8 @@ static int msg_part_decref (struct msg_part *mp) /* {{{ */{
   int cnt = 0;
   while (mp) {
     check_msg_part_magic (mp);
-    if (mp->refcnt == 1) {
-      mp->refcnt = 0;
-    } else {
-      if (__sync_fetch_and_add (&mp->refcnt, -1) > 1) {
-        break;
-      }
+    if (__sync_fetch_and_add (&mp->refcnt, -1) > 1) {
+      break;
     }
   
     assert (mp->magic == MSG_PART_MAGIC);

@@ -41,6 +41,9 @@
 #include <sys/mman.h>
 #include <netdb.h>
 #include <ctype.h>
+#ifndef HAVE_JEMALLOC
+#include <malloc.h>
+#endif
 #include <openssl/rand.h>
 #include <openssl/rsa.h>
 #include <openssl/pem.h>
@@ -69,6 +72,7 @@
 #include "net/net-ip-acl.h"
 #include "net/net-tcp-drs.h"
 #include "common/toml-config.h"
+#include "mtproto/ip-stats.h"
 
 #ifndef COMMIT
 #define COMMIT "unknown"
@@ -137,6 +141,9 @@ conn_type_t ct_http_server_mtfront, ct_tcp_rpc_ext_server_mtfront, ct_tcp_rpc_se
 long long connections_failed_lru, connections_failed_flood;
 long long api_invoke_requests;
 
+static char *geoip_db_path;
+static int ip_stats_top_n = 100;
+
 volatile int sigpoll_cnt;
 
 #define STATS_BUFF_SIZE	(1 << 20)
@@ -146,8 +153,8 @@ char stats_buff[STATS_BUFF_SIZE];
 
 
 // current HTTP query headers
-char cur_http_origin[1024], cur_http_referer[1024], cur_http_user_agent[1024];
-int cur_http_origin_len, cur_http_referer_len, cur_http_user_agent_len;
+static __thread char cur_http_origin[1024], cur_http_referer[1024], cur_http_user_agent[1024];
+static __thread int cur_http_origin_len, cur_http_referer_len, cur_http_user_agent_len;
 
 int check_conn_buffers (connection_job_t c);
 void lru_insert_conn (connection_job_t c);
@@ -598,6 +605,9 @@ void update_local_stats (void) {
   }
   update_local_stats_copy (WStats + worker_id * 2);
   update_local_stats_copy (WStats + worker_id * 2 + 1);
+#ifndef HAVE_JEMALLOC
+  malloc_trim (0);
+#endif
 }
 
 void compute_stats_sum (void) {
@@ -1042,6 +1052,8 @@ void mtfront_prepare_prometheus_stats (stats_buffer_t *sb) {
     }
   }
 
+  ip_stats_prometheus (sb, ip_stats_top_n);
+
 #undef S
 #undef S1
 #undef SW
@@ -1412,6 +1424,7 @@ int mtproto_ext_rpc_ready (connection_job_t C) {
   /* Per-secret increment is NOT done here — this callback fires at connection
      acceptance, before the handshake identifies the secret (extra_int2 = 0).
      The increment happens in tcp_rpcs_compact_parse_execute after handshake. */
+  ip_stats_connect (CONN_INFO(C)->remote_ip);
   lru_insert_conn (C);
   return 0;
 }
@@ -1419,6 +1432,7 @@ int mtproto_ext_rpc_ready (connection_job_t C) {
 int mtproto_ext_rpc_close (connection_job_t C, int who) {
   assert ((unsigned) CONN_INFO(C)->fd < MAX_CONNECTIONS);
   vkprintf (3, "ext_rpc connection closing (%d) by %d\n", CONN_INFO(C)->fd, who);
+  ip_stats_disconnect (CONN_INFO(C)->remote_ip);
   int sid = TCP_RPC_DATA(C)->extra_int2;
   if (sid > 0 && sid <= 16) {
     per_secret_connections[sid - 1]--;
@@ -1750,7 +1764,7 @@ int hts_stats_execute (connection_job_t c, struct raw_message *msg, int op) {
   }
 
   stats_buffer_t sb;
-  sb_alloc(&sb, 1 << 20);
+  sb_alloc(&sb, 1 << 22);  /* 4MB for /metrics with per-IP geo data */
 
   const char *content_type;
   if (is_metrics) {
@@ -2753,6 +2767,13 @@ int f_parse_option (int val) {
   case 2006:
     toml_config_path = strdup (optarg);
     break;
+  case 2007:
+    geoip_db_path = strdup (optarg);
+    break;
+  case 2008:
+    ip_stats_top_n = atoi (optarg);
+    if (ip_stats_top_n < 0) ip_stats_top_n = 0;
+    break;
   default:
     return -1;
   }
@@ -2777,6 +2798,8 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("stats-allow-net", required_argument, 0, 2004, "CIDR range to allow stats access from, e.g. 100.64.0.0/10 (repeatable)");
   parse_option ("dc-override", required_argument, 0, 2005, "override DC address: dc_id:host:port or dc_id:[ipv6]:port (repeatable, direct mode)");
   parse_option ("config", required_argument, 0, 2006, "path to TOML config file (reloaded on SIGHUP for secrets/ACLs)");
+  parse_option ("geoip-db", required_argument, 0, 2007, "path to MaxMind GeoLite2-City.mmdb or GeoLite2-Country.mmdb for country metrics");
+  parse_option ("ip-stats-top", required_argument, 0, 2008, "number of top IPs to expose in /metrics (default 100)");
 }
 
 void mtfront_parse_extra_args (int argc, char *argv[]) /* {{{ */ {
@@ -2798,6 +2821,10 @@ void mtfront_parse_extra_args (int argc, char *argv[]) /* {{{ */ {
 
 // executed BEFORE dropping privileges
 void mtfront_pre_init (void) {
+#ifndef HAVE_JEMALLOC
+  mallopt (M_TRIM_THRESHOLD, 128 * 1024);
+  mallopt (M_MMAP_THRESHOLD, 256 * 1024);
+#endif
   /* Load TOML config early — sets direct_mode and other options */
   if (toml_config_path) {
     char errbuf[512];
@@ -2901,6 +2928,11 @@ void mtfront_pre_init (void) {
   if (ip_acl_reload () < 0) {
     kprintf ("failed to load IP ACL files\n");
     exit (1);
+  }
+
+  ip_stats_init ();
+  if (geoip_db_path) {
+    ip_stats_geoip_load (geoip_db_path);
   }
 
   /* Pin CLI -S secrets, then load TOML secrets on top */

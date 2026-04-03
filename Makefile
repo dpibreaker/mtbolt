@@ -20,7 +20,7 @@ endif
 HOST_ARCH := $(shell uname -m)
 
 # Default CFLAGS and LDFLAGS
-COMMON_CFLAGS := -O3 -std=gnu11 -Wall -fno-strict-aliasing -fno-strict-overflow -fwrapv -fno-common -DAES=1 -DCOMMIT=\"${COMMIT}\" -DVERSION=\"${VERSION}\" -D_FILE_OFFSET_BITS=64 -Wno-array-bounds -Wno-implicit-function-declaration
+COMMON_CFLAGS := -O3 -std=gnu11 -Wall -fno-strict-aliasing -fno-strict-overflow -fwrapv -fno-common -DAES=1 -DCOMMIT=\"${COMMIT}\" -DVERSION=\"${VERSION}\" -D_FILE_OFFSET_BITS=64 -Wno-array-bounds -fstack-protector-strong -D_FORTIFY_SOURCE=2 -fPIE
 
 # Platform-specific flags
 UNAME_S := $(shell uname -s)
@@ -40,7 +40,7 @@ ifeq ($(UNAME_S), Darwin)
 else
   # Linux
   COMMON_CFLAGS += -D_GNU_SOURCE=1
-  COMMON_LDFLAGS := -ggdb -rdynamic -lm -lrt -lcrypto -lz -lpthread
+  COMMON_LDFLAGS := -ggdb -rdynamic -pie -Wl,-z,relro,-z,now -lm -lrt -lcrypto -lz -lpthread
 endif
 
 # Auto-detect libunwind for stack traces on musl/Alpine (test/CI builds)
@@ -49,6 +49,22 @@ LIBUNWIND_LDFLAGS := $(shell pkg-config --libs libunwind 2>/dev/null)
 ifneq ($(LIBUNWIND_LDFLAGS),)
 COMMON_CFLAGS += -DHAVE_LIBUNWIND $(LIBUNWIND_CFLAGS)
 COMMON_LDFLAGS += $(LIBUNWIND_LDFLAGS)
+endif
+
+# Auto-detect libmaxminddb for GeoIP country metrics
+MAXMINDDB_CFLAGS := $(shell pkg-config --cflags libmaxminddb 2>/dev/null)
+MAXMINDDB_LDFLAGS := $(shell pkg-config --libs libmaxminddb 2>/dev/null)
+ifneq ($(MAXMINDDB_LDFLAGS),)
+COMMON_CFLAGS += -DHAVE_MAXMINDDB $(MAXMINDDB_CFLAGS)
+COMMON_LDFLAGS += $(MAXMINDDB_LDFLAGS)
+endif
+
+# Auto-detect jemalloc for improved memory allocation
+JEMALLOC_CFLAGS := $(shell pkg-config --cflags jemalloc 2>/dev/null)
+JEMALLOC_LDFLAGS := $(shell pkg-config --libs jemalloc 2>/dev/null)
+ifneq ($(JEMALLOC_LDFLAGS),)
+COMMON_CFLAGS += -DHAVE_JEMALLOC $(JEMALLOC_CFLAGS)
+COMMON_LDFLAGS += $(JEMALLOC_LDFLAGS)
 endif
 
 # Support additional flags (e.g. sanitizers): make EXTRA_CFLAGS="-fsanitize=address"
@@ -85,7 +101,7 @@ EXELIST	:= ${EXE}/teleproxy
 
 
 OBJECTS	=	\
-  ${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o
+  ${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/ip-stats.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o
 
 DEPENDENCE_CXX		:=	$(subst ${OBJ}/,${DEP}/,$(patsubst %.o,%.d,${OBJECTS_CXX}))
 DEPENDENCE_STRANGE	:=	$(subst ${OBJ}/,${DEP}/,$(patsubst %.o,%.d,${OBJECTS_STRANGE}))
@@ -143,7 +159,7 @@ ${LIB_OBJS_NORMAL}: ${OBJ}/%.o: %.c | create_dirs_and_headers
 
 ${EXELIST}: ${LIBLIST}
 
-${EXE}/teleproxy:	${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o
+${EXE}/teleproxy:	${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/ip-stats.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o
 	${CC} -o $@ $^ ${LDFLAGS}
 
 ${LIB}/libkdb.a: ${LIB_OBJS}

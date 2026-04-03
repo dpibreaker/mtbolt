@@ -31,6 +31,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <openssl/crypto.h>
 
 /*
  * 32-bit integer manipulation macros (little endian)
@@ -270,6 +271,8 @@ void md5_finish( md5_context *ctx, unsigned char output[16] )
     PUT_ULONG_LE( ctx->state[1], output,  4 );
     PUT_ULONG_LE( ctx->state[2], output,  8 );
     PUT_ULONG_LE( ctx->state[3], output, 12 );
+
+    OPENSSL_cleanse(ctx, sizeof(md5_context));
 }
 
 /*

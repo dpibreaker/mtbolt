@@ -36,6 +36,7 @@
 #include <openssl/bn.h>
 #include <openssl/sha.h>
 #include <openssl/rand.h>
+#include <openssl/crypto.h>
 
 #include "crc32.h"
 #include "net/net-events.h"
@@ -133,6 +134,7 @@ int init_dh_params (void) {
   SHA1 (buf, sizeof (buf), shabuf);
 
   rpc_BN_ctx = BN_CTX_new ();
+  assert (rpc_BN_ctx);
 
   dh_params_select = *(int *)shabuf;
   assert (dh_params_select == RPC_PARAM_HASH);
@@ -145,6 +147,7 @@ int init_dh_params (void) {
 void create_g_a (unsigned char g_a[256], unsigned char a[256]) {
   if (!rpc_BN_ctx) {
     rpc_BN_ctx = BN_CTX_new ();
+    assert (rpc_BN_ctx);
   }
   do {
     assert (RAND_bytes (a, 256) >= 0); /* if you write '>0', the assert will fail. It's very sad */
@@ -179,6 +182,7 @@ int dh_first_round (unsigned char g_a[256], struct crypto_temp_dh_params *dh_par
 static void dh_inner_round (unsigned char g_ab[256], const unsigned char g_b[256], const unsigned char a[256]) {
   if (!rpc_BN_ctx) {
     rpc_BN_ctx = BN_CTX_new ();
+    assert (rpc_BN_ctx);
   }
   BIGNUM *dh_base = BN_new ();
   assert (BN_bin2bn (g_b, 256, dh_base) == dh_base);
@@ -213,7 +217,7 @@ int dh_second_round (unsigned char g_ab[256], unsigned char g_a[256], const unsi
 
   dh_inner_round (g_ab, g_b, a);
 
-  memset (a, 0, sizeof (a));
+  OPENSSL_cleanse (a, sizeof (a));
 
   vkprintf (2, "DH key is %02x%02x%02x...%02x%02x%02x\n", g_ab[0], g_ab[1], g_ab[2], g_ab[253], g_ab[254], g_ab[255]);
   MODULE_STAT->tot_dh_rounds[1]++;

@@ -30,6 +30,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#ifndef HAVE_JEMALLOC
+#include <malloc.h>
+#endif
 
 #include "kprintf.h"
 #include "jobs/jobs.h"
@@ -84,7 +87,7 @@ struct msg_buffers_chunk ChunkHeaders[MAX_BUFFER_SIZE_VALUES];
 __thread struct msg_buffers_chunk *ChunkSave[MAX_BUFFER_SIZE_VALUES];
 
 int default_buffer_sizes[] = { 48, 512, 2048, 16384, 262144 };
-int default_buffer_sizes_cnt = sizeof (default_buffer_sizes) / 4;
+int default_buffer_sizes_cnt = sizeof (default_buffer_sizes) / sizeof (default_buffer_sizes[0]);
 
 int free_std_msg_buffer (struct msg_buffers_chunk *C, struct msg_buffer *X);
 
@@ -294,6 +297,9 @@ void free_msg_buffers_chunk_internal (struct msg_buffers_chunk *C, struct msg_bu
 
   memset (C, 0, sizeof (struct msg_buffers_chunk));
   free (C);
+#ifndef HAVE_JEMALLOC
+  malloc_trim (0);
+#endif
 
   int si = buffer_size_values - 1;
   while (si > 0 && &ChunkHeaders[si-1] != CH) {
@@ -302,7 +308,7 @@ void free_msg_buffers_chunk_internal (struct msg_buffers_chunk *C, struct msg_bu
   assert (si >= 0);
 
   if (ChunkSave[si] == C) {
-    ChunkSave[si] = NULL;
+    ChunkSave[si] = 0;
   }
 
   free_mp_queue (bq);
@@ -403,8 +409,6 @@ struct msg_buffer *alloc_msg_buffer_internal (struct msg_buffer *neighbor, struc
   assert (C != CH);
   assert (C->free_cnt[1]);
   assert (C->magic == MSG_CHUNK_USED_LOCKED_MAGIC);
-  ChunkSave[si] = C;
-
   int two_power = C->two_power, i = 1;
 
   if (neighbor && neighbor->chunk == C) {
@@ -484,7 +488,9 @@ struct msg_buffer *alloc_msg_buffer_internal (struct msg_buffer *neighbor, struc
   //__sync_fetch_and_add (&total_used_buffers, 1);
   MODULE_STAT->total_used_buffers_size += C->buffer_size;
   MODULE_STAT->total_used_buffers ++;
-  
+
+  ChunkSave[si] = C;
+
   return X;
 }
 

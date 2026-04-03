@@ -19,6 +19,7 @@
 */
 
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -107,6 +108,7 @@ long long cfg_getint (void) {
   char *s = cfg_cur;
   long long x = 0;
   while (*s >= '0' && *s <= '9') {
+    if (x > LLONG_MAX / 10) { return LLONG_MAX; }
     x = x * 10 + *(s ++) - '0';
   }
   cfg_cur = s;
@@ -138,6 +140,7 @@ long long cfg_getint_signed_zero (void) {
     ++s;
   }
   while (*s >= '0' && *s <= '9') {
+    if (x > LLONG_MAX / 10 || x < LLONG_MIN / 10) { return (sgn > 0) ? LLONG_MAX : LLONG_MIN; }
     x = x * 10 + sgn * (*(s++) - '0');
   }
   if (s == cfg_cur + (sgn < 0)) {

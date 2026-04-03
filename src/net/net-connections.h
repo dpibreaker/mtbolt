@@ -35,8 +35,8 @@
 #include "common/mp-queue.h"
 #include "common/pid.h"
 
-#define MAX_CONNECTIONS	65536
-#define MAX_TARGETS	65536
+#define MAX_CONNECTIONS	10485760
+#define MAX_TARGETS	10485760
 #define PRIME_TARGETS	99961
 #define MAX_SPECIAL_LISTEN_SOCKETS	64
 

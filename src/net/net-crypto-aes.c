@@ -46,6 +46,9 @@
 #include "md5.h"
 #include "sha1.h"
 
+#include <openssl/rand.h>
+#include <openssl/crypto.h>
+
 #include "jobs/jobs.h"
 #include "common/common-stats.h"
 
@@ -165,7 +168,16 @@ int aes_load_pwd_file (const char *filename) {
     close (h);
   }
 
-  *(long *) rand_buf ^= lrand48_j();
+  {
+    unsigned char crypto_rand[8];
+    if (RAND_bytes(crypto_rand, sizeof(crypto_rand)) == 1) {
+      int i;
+      for (i = 0; i < (int)sizeof(crypto_rand); i++) {
+        rand_buf[i] ^= crypto_rand[i];
+      }
+    }
+    OPENSSL_cleanse(crypto_rand, sizeof(crypto_rand));
+  }
 
   srand48 (*(long *)rand_buf);
 
@@ -215,8 +227,12 @@ int aes_load_pwd_file (const char *filename) {
 }
 
 int aes_generate_nonce (char res[16]) {
-  *(int *)(rand_buf + 16) = lrand48_j ();
-  *(int *)(rand_buf + 20) = lrand48_j ();
+  {
+    unsigned char nonce_rand[8];
+    RAND_bytes(nonce_rand, sizeof(nonce_rand));
+    memcpy(rand_buf + 16, nonce_rand, 8);
+    OPENSSL_cleanse(nonce_rand, sizeof(nonce_rand));
+  }
   *(long long *)(rand_buf + 24) = rdtsc ();
   struct timespec T;
   assert (clock_gettime(CLOCK_REALTIME, &T) >= 0);
@@ -304,7 +320,7 @@ int aes_create_keys (struct aes_key_data *R, int am_client, const char nonce_ser
   sha1 (str, str_len, R->read_key + 12);
   md5 (str + 2, str_len - 2, R->read_iv);
 
-  memset (str, 0, str_len);
+  OPENSSL_cleanse (str, str_len);
 
   return 1;
 }

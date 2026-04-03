@@ -103,6 +103,7 @@ struct tl_query_header *tl_query_header_dup (struct tl_query_header *h) {
 }
   
 struct tl_query_header *tl_query_header_clone (struct tl_query_header *h_old) {
+  if (!h_old) { return NULL; }
   struct tl_query_header *h = malloc (sizeof (*h));
   memcpy (h, h_old, sizeof (*h));
   h->ref_cnt = 1;
