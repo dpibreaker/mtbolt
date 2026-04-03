@@ -1780,7 +1780,7 @@ int hts_stats_execute (connection_job_t c, struct raw_message *msg, int op) {
   }
 
   stats_buffer_t sb;
-  sb_alloc(&sb, 1 << 22);  /* 4MB for /metrics with per-IP geo data */
+  sb_alloc(&sb, 1 << 20);  /* 1MB for /metrics */
 
   const char *content_type;
   if (is_metrics) {

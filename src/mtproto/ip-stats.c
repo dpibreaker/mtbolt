@@ -310,21 +310,15 @@ void ip_stats_prometheus (stats_buffer_t *sb, int top_n) {
     "# TYPE teleproxy_unique_ips gauge\n"
     "teleproxy_unique_ips %d\n", shared->used);
 
-  /* All active IPs with geo data */
-  (void) top_n;
-
-  sb_printf (sb,
-    "# HELP teleproxy_client Active client IPs with geo coordinates.\n"
-    "# TYPE teleproxy_client gauge\n");
-
-  for (int i = 0; i < IP_HT_SIZE; i++) {
-    struct ip_ht_slot *s = &shared->ht[i];
-    if (s->ip == 0 || s->active_conns <= 0) continue;
-    struct in_addr addr;
-    addr.s_addr = htonl (s->ip);
-    char ip_str[INET_ADDRSTRLEN];
-    inet_ntop (AF_INET, &addr, ip_str, sizeof (ip_str));
-    sb_printf (sb, "teleproxy_client{ip=\"%s\",country=\"%s\",city=\"%s\",latitude=\"%.4f\",longitude=\"%.4f\"} %d\n",
-      ip_str, s->cc, s->city, s->latitude, s->longitude, s->active_conns);
+  /* Count currently active unique IPs (with active_conns > 0) */
+  int online_ips = 0;
+  for (int i = 0; i < 256 && i < cs->count; i++) {
+    online_ips += cs->entries[i].unique_ips;
   }
+  sb_printf (sb,
+    "# HELP teleproxy_online_ips Currently online unique IPs.\n"
+    "# TYPE teleproxy_online_ips gauge\n"
+    "teleproxy_online_ips %d\n", online_ips);
+
+  (void) top_n;
 }
