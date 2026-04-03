@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 #ifndef HAVE_JEMALLOC
 #include <malloc.h>
 #endif
@@ -525,6 +526,15 @@ int free_std_msg_buffer (struct msg_buffers_chunk *C, struct msg_buffer *X) {
   
   MODULE_STAT->total_used_buffers --;
   MODULE_STAT->total_used_buffers_size -= C->buffer_size;
+
+  /* When all buffers in chunk are free, release physical pages back to OS.
+     The virtual mapping stays valid — pages fault back in when chunk is reused.
+     No locks needed, no free(), no race conditions. */
+  if (C->free_cnt[1] == C->tot_buffers) {
+    void *data_start = (void *) C->first_buffer;
+    size_t data_len = (char *) C + MSG_BUFFERS_CHUNK_SIZE - (char *) data_start;
+    madvise (data_start, data_len, MADV_DONTNEED);
+  }
 
   return 1;
 }
