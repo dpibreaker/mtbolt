@@ -8,6 +8,9 @@
 | `SECRET_1`...`SECRET_16` | — | Numbered secrets (combined with `SECRET` if both set) |
 | `SECRET_LABEL_1`...`SECRET_LABEL_16` | — | Labels for numbered secrets |
 | `SECRET_LIMIT_1`...`SECRET_LIMIT_16` | — | Per-secret connection limits |
+| `SECRET_QUOTA_1`...`SECRET_QUOTA_16` | — | Per-secret byte quota (e.g. `10737418240` for 10 GB) |
+| `SECRET_MAX_IPS_1`...`SECRET_MAX_IPS_16` | — | Per-secret unique IP limits |
+| `SECRET_EXPIRES_1`...`SECRET_EXPIRES_16` | — | Per-secret expiration (TOML datetime or Unix timestamp) |
 | `PORT` | 443 | Client connection port |
 | `STATS_PORT` | 8888 | Statistics endpoint port |
 | `WORKERS` | 1 | Worker processes |
@@ -19,6 +22,7 @@
 | `IP_BLOCKLIST` | — | Path to CIDR blocklist file |
 | `IP_ALLOWLIST` | — | Path to CIDR allowlist file |
 | `STATS_ALLOW_NET` | — | Comma-separated CIDR ranges to allow stats access from (e.g. `100.64.0.0/10,fd00::/8`) |
+| `SOCKS5_PROXY` | — | Route upstream DC connections through a SOCKS5 proxy (`socks5://[user:pass@]host:port`) |
 | `DC_OVERRIDE` | — | Comma-separated DC address overrides for direct mode (e.g. `2:1.2.3.4:443,2:5.6.7.8:443`) |
 
 Maximum 16 secrets (binary limit).

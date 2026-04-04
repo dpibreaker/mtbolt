@@ -63,6 +63,9 @@
 #include "net/net-tcp-rpc-ext-server.h"
 #include "net/net-crypto-aes.h"
 #include "net/net-crypto-dh.h"
+#include "mtproto-check.h"
+#include "mtproto-link.h"
+#include "qrcode/qrcodegen.h"
 #include "mtproto-common.h"
 #include "mtproto-config.h"
 #include "mtproto-dc-table.h"
@@ -210,6 +213,11 @@ struct ext_connection_ref {
 long long ext_connections, ext_connections_created;
 long long per_secret_connections[16], per_secret_connections_created[16];
 long long per_secret_connections_rejected[16];
+long long per_secret_bytes_received[16], per_secret_bytes_sent[16];
+long long per_secret_rejected_quota[16];
+long long per_secret_rejected_ips[16];
+long long per_secret_rejected_expired[16];
+long long per_secret_unique_ips[16];
 
 struct ext_connection_ref OutExtConnections[EXT_CONN_TABLE_SIZE];
 struct ext_connection *InExtConnectionHash[EXT_CONN_HASH_SIZE];
@@ -437,6 +445,7 @@ struct worker_stats {
   long long direct_dc_connections_created, direct_dc_connections_active;
   long long direct_dc_connections_failed, direct_dc_connections_dc_closed;
   long long direct_dc_retries;
+  long long socks5_connects_attempted, socks5_connects_succeeded, socks5_connects_failed;
 
   long long connections_failed_lru, connections_failed_flood;
 
@@ -452,6 +461,12 @@ struct worker_stats {
   long long per_secret_connections[16];
   long long per_secret_connections_created[16];
   long long per_secret_connections_rejected[16];
+  long long per_secret_bytes_received[16];
+  long long per_secret_bytes_sent[16];
+  long long per_secret_rejected_quota[16];
+  long long per_secret_rejected_ips[16];
+  long long per_secret_rejected_expired[16];
+  long long per_secret_unique_ips[16];
 };
 
 struct worker_stats *WStats, SumStats;
@@ -509,6 +524,9 @@ static void update_local_stats_copy (struct worker_stats *S) {
   UPD (direct_dc_connections_failed);
   UPD (direct_dc_connections_dc_closed);
   UPD (direct_dc_retries);
+  UPD (socks5_connects_attempted);
+  UPD (socks5_connects_succeeded);
+  UPD (socks5_connects_failed);
   UPD (connections_failed_lru);
   UPD (connections_failed_flood);
   UPD (ext_connections);
@@ -523,6 +541,12 @@ static void update_local_stats_copy (struct worker_stats *S) {
     UPD (per_secret_connections[_i]);
     UPD (per_secret_connections_created[_i]);
     UPD (per_secret_connections_rejected[_i]);
+    UPD (per_secret_bytes_received[_i]);
+    UPD (per_secret_bytes_sent[_i]);
+    UPD (per_secret_rejected_quota[_i]);
+    UPD (per_secret_rejected_ips[_i]);
+    UPD (per_secret_rejected_expired[_i]);
+    UPD (per_secret_unique_ips[_i]);
   }}
 #undef UPD
   __sync_synchronize();
@@ -597,6 +621,9 @@ static inline void add_stats (struct worker_stats *W) {
   UPD (direct_dc_connections_failed);
   UPD (direct_dc_connections_dc_closed);
   UPD (direct_dc_retries);
+  UPD (socks5_connects_attempted);
+  UPD (socks5_connects_succeeded);
+  UPD (socks5_connects_failed);
   UPD (connections_failed_lru);
   UPD (connections_failed_flood);
   UPD (ext_connections);
@@ -611,6 +638,12 @@ static inline void add_stats (struct worker_stats *W) {
     UPD (per_secret_connections[_i]);
     UPD (per_secret_connections_created[_i]);
     UPD (per_secret_connections_rejected[_i]);
+    UPD (per_secret_bytes_received[_i]);
+    UPD (per_secret_bytes_sent[_i]);
+    UPD (per_secret_rejected_quota[_i]);
+    UPD (per_secret_rejected_ips[_i]);
+    UPD (per_secret_rejected_expired[_i]);
+    UPD (per_secret_unique_ips[_i]);
   }}
 #undef UPD
 }
@@ -740,6 +773,10 @@ void mtfront_prepare_stats (stats_buffer_t *sb) {
 	     "direct_dc_connections_failed\t%lld\n"
 	     "direct_dc_connections_dc_closed\t%lld\n"
 	     "direct_dc_retries\t%lld\n"
+	     "socks5_enabled\t%d\n"
+	     "socks5_connects_attempted\t%lld\n"
+	     "socks5_connects_succeeded\t%lld\n"
+	     "socks5_connects_failed\t%lld\n"
 	     "drs_delays_enabled\t%d\n"
 	     "drs_delays_applied\t%lld\n"
 	     "drs_delays_skipped\t%lld\n"
@@ -820,6 +857,10 @@ void mtfront_prepare_stats (stats_buffer_t *sb) {
 	     S(direct_dc_connections_failed),
 	     S(direct_dc_connections_dc_closed),
 	     S(direct_dc_retries),
+	     socks5_is_enabled (),
+	     S(socks5_connects_attempted),
+	     S(socks5_connects_succeeded),
+	     S(socks5_connects_failed),
 	     drs_delays_enabled,
 	     S(drs_delays_applied),
 	     S(drs_delays_skipped),
@@ -832,16 +873,39 @@ void mtfront_prepare_stats (stats_buffer_t *sb) {
   { int _sc = tcp_rpcs_get_ext_secret_count();
     int _i;
     for (_i = 0; _i < _sc; _i++) {
+      const char *_lbl = tcp_rpcs_get_ext_secret_label (_i);
       sb_printf (sb,
 	       "secret_%s_connections\t%lld\n"
 	       "secret_%s_connections_created\t%lld\n"
-	       "secret_%s_rejected\t%lld\n",
-	       tcp_rpcs_get_ext_secret_label (_i), S(per_secret_connections[_i]),
-	       tcp_rpcs_get_ext_secret_label (_i), S(per_secret_connections_created[_i]),
-	       tcp_rpcs_get_ext_secret_label (_i), S(per_secret_connections_rejected[_i]));
+	       "secret_%s_rejected\t%lld\n"
+	       "secret_%s_bytes_total\t%lld\n"
+	       "secret_%s_unique_ips\t%lld\n"
+	       "secret_%s_rejected_quota\t%lld\n"
+	       "secret_%s_rejected_ips\t%lld\n"
+	       "secret_%s_rejected_expired\t%lld\n",
+	       _lbl, S(per_secret_connections[_i]),
+	       _lbl, S(per_secret_connections_created[_i]),
+	       _lbl, S(per_secret_connections_rejected[_i]),
+	       _lbl, S(per_secret_bytes_received[_i]) + S(per_secret_bytes_sent[_i]),
+	       _lbl, S(per_secret_unique_ips[_i]),
+	       _lbl, S(per_secret_rejected_quota[_i]),
+	       _lbl, S(per_secret_rejected_ips[_i]),
+	       _lbl, S(per_secret_rejected_expired[_i]));
       int _lim = tcp_rpcs_get_ext_secret_limit (_i);
       if (_lim > 0) {
-        sb_printf (sb, "secret_%s_limit\t%d\n", tcp_rpcs_get_ext_secret_label (_i), _lim);
+        sb_printf (sb, "secret_%s_limit\t%d\n", _lbl, _lim);
+      }
+      long long _quota = tcp_rpcs_get_ext_secret_quota (_i);
+      if (_quota > 0) {
+        sb_printf (sb, "secret_%s_quota\t%lld\n", _lbl, _quota);
+      }
+      int _mips = tcp_rpcs_get_ext_secret_max_ips (_i);
+      if (_mips > 0) {
+        sb_printf (sb, "secret_%s_max_ips\t%d\n", _lbl, _mips);
+      }
+      int64_t _exp = tcp_rpcs_get_ext_secret_expires (_i);
+      if (_exp > 0) {
+        sb_printf (sb, "secret_%s_expires\t%lld\n", _lbl, (long long) _exp);
       }
     }
   }
@@ -930,6 +994,15 @@ void mtfront_prepare_prometheus_stats (stats_buffer_t *sb) {
 	     "# HELP teleproxy_direct_dc_retries_total DC connection retry attempts.\n"
 	     "# TYPE teleproxy_direct_dc_retries_total counter\n"
 	     "teleproxy_direct_dc_retries_total %lld\n"
+	     "# HELP teleproxy_socks5_connects_attempted_total SOCKS5 upstream connect attempts.\n"
+	     "# TYPE teleproxy_socks5_connects_attempted_total counter\n"
+	     "teleproxy_socks5_connects_attempted_total %lld\n"
+	     "# HELP teleproxy_socks5_connects_succeeded_total SOCKS5 upstream connects succeeded.\n"
+	     "# TYPE teleproxy_socks5_connects_succeeded_total counter\n"
+	     "teleproxy_socks5_connects_succeeded_total %lld\n"
+	     "# HELP teleproxy_socks5_connects_failed_total SOCKS5 upstream connects failed.\n"
+	     "# TYPE teleproxy_socks5_connects_failed_total counter\n"
+	     "teleproxy_socks5_connects_failed_total %lld\n"
 	     "# HELP teleproxy_drs_delays_total Total inter-record delays injected.\n"
 	     "# TYPE teleproxy_drs_delays_total counter\n"
 	     "teleproxy_drs_delays_total %lld\n"
@@ -970,6 +1043,9 @@ void mtfront_prepare_prometheus_stats (stats_buffer_t *sb) {
 	     S(direct_dc_connections_failed),
 	     S(direct_dc_connections_dc_closed),
 	     S(direct_dc_retries),
+	     S(socks5_connects_attempted),
+	     S(socks5_connects_succeeded),
+	     S(socks5_connects_failed),
 	     S(drs_delays_applied),
 	     S(drs_delays_skipped),
 	     drs_delay_get_k (),
@@ -1064,6 +1140,76 @@ void mtfront_prepare_prometheus_stats (stats_buffer_t *sb) {
       for (_i = 0; _i < _sc; _i++) {
         sb_printf (sb, "teleproxy_secret_connections_rejected_total{secret=\"%s\"} %lld\n",
 	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_connections_rejected[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_bytes_received_total Bytes received from clients per secret.\n"
+	       "# TYPE teleproxy_secret_bytes_received_total counter\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_bytes_received_total{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_bytes_received[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_bytes_sent_total Bytes sent to clients per secret.\n"
+	       "# TYPE teleproxy_secret_bytes_sent_total counter\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_bytes_sent_total{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_bytes_sent[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_bytes_total Total bytes transferred (rx+tx) per secret.\n"
+	       "# TYPE teleproxy_secret_bytes_total counter\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_bytes_total{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_bytes_received[_i]) + S(per_secret_bytes_sent[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_quota_bytes Configured byte quota per secret (0=unlimited).\n"
+	       "# TYPE teleproxy_secret_quota_bytes gauge\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_quota_bytes{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), tcp_rpcs_get_ext_secret_quota (_i));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_max_ips Configured unique IP limit per secret (0=unlimited).\n"
+	       "# TYPE teleproxy_secret_max_ips gauge\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_max_ips{secret=\"%s\"} %d\n",
+	         tcp_rpcs_get_ext_secret_label (_i), tcp_rpcs_get_ext_secret_max_ips (_i));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_unique_ips Current unique IPs connected per secret.\n"
+	       "# TYPE teleproxy_secret_unique_ips gauge\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_unique_ips{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_unique_ips[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_expires_timestamp Expiration Unix timestamp per secret (0=never).\n"
+	       "# TYPE teleproxy_secret_expires_timestamp gauge\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_expires_timestamp{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), (long long) tcp_rpcs_get_ext_secret_expires (_i));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_rejected_quota_total Connections rejected due to byte quota.\n"
+	       "# TYPE teleproxy_secret_rejected_quota_total counter\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_rejected_quota_total{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_rejected_quota[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_rejected_ips_total Connections rejected due to unique IP limit.\n"
+	       "# TYPE teleproxy_secret_rejected_ips_total counter\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_rejected_ips_total{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_rejected_ips[_i]));
+      }
+      sb_printf (sb,
+	       "# HELP teleproxy_secret_rejected_expired_total Connections rejected due to secret expiration.\n"
+	       "# TYPE teleproxy_secret_rejected_expired_total counter\n");
+      for (_i = 0; _i < _sc; _i++) {
+        sb_printf (sb, "teleproxy_secret_rejected_expired_total{secret=\"%s\"} %lld\n",
+	         tcp_rpcs_get_ext_secret_label (_i), S(per_secret_rejected_expired[_i]));
       }
     }
   }
@@ -1452,6 +1598,7 @@ int mtproto_ext_rpc_close (connection_job_t C, int who) {
   int sid = TCP_RPC_DATA(C)->extra_int2;
   if (sid > 0 && sid <= 16) {
     per_secret_connections[sid - 1]--;
+    tcp_rpcs_ip_track_disconnect (sid - 1, CONN_INFO(C)->remote_ip, CONN_INFO(C)->remote_ipv6);
   }
   struct ext_connection *Ex = get_ext_connection_by_in_fd (CONN_INFO(C)->fd);
   if (Ex) {
@@ -1753,6 +1900,10 @@ static inline int is_private_ip (unsigned ip) {
       || (ip >> 16) == 0xC0A8;   // 192.168.0.0/16
 }
 
+/* forward declaration — defined after static variable block */
+static void mtfront_prepare_link_page (stats_buffer_t *sb,
+                                       const char *host, int host_len);
+
 int hts_stats_execute (connection_job_t c, struct raw_message *msg, int op) {
   struct hts_data *D = HTS_DATA(c);
 
@@ -1774,8 +1925,9 @@ int hts_stats_execute (connection_job_t c, struct raw_message *msg, int op) {
 
   int is_stats = (D->uri_size == 6 && !memcmp (ReqHdr + D->uri_offset, "/stats", 6));
   int is_metrics = (D->uri_size == 8 && !memcmp (ReqHdr + D->uri_offset, "/metrics", 8));
+  int is_link = (D->uri_size == 5 && !memcmp (ReqHdr + D->uri_offset, "/link", 5));
 
-  if (!is_stats && !is_metrics) {
+  if (!is_stats && !is_metrics && !is_link) {
     return -404;
   }
 
@@ -1783,7 +1935,10 @@ int hts_stats_execute (connection_job_t c, struct raw_message *msg, int op) {
   sb_alloc(&sb, 1 << 20);  /* 1MB for /metrics */
 
   const char *content_type;
-  if (is_metrics) {
+  if (is_link) {
+    mtfront_prepare_link_page (&sb, ReqHdr + D->host_offset, D->host_size);
+    content_type = "text/html; charset=utf-8";
+  } else if (is_metrics) {
     mtfront_prepare_prometheus_stats(&sb);
     content_type = "text/plain; version=0.0.4; charset=utf-8";
   } else {
@@ -2464,6 +2619,165 @@ static struct toml_config toml_cfg;
 // static double next_create_outbound;
 // int outbound_connections_per_second = DEFAULT_OUTBOUND_CONNECTION_CREATION_RATE;
 
+/* ── /link endpoint: HTML page with SVG QR codes ─────────────── */
+
+static void sb_qr_svg (stats_buffer_t *sb, const char *url) {
+  uint8_t qrcode[qrcodegen_BUFFER_LEN_MAX];
+  uint8_t temp[qrcodegen_BUFFER_LEN_MAX];
+
+  if (!qrcodegen_encodeText (url, temp, qrcode, qrcodegen_Ecc_LOW,
+                             qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
+                             qrcodegen_Mask_AUTO, true)) {
+    sb_printf (sb, "<p>QR encoding failed</p>\n");
+    return;
+  }
+
+  int size = qrcodegen_getSize (qrcode);
+  int margin = 2;
+  int full = size + 2 * margin;
+
+  sb_printf (sb, "<svg viewBox=\"0 0 %d %d\" xmlns=\"http://www.w3.org/2000/svg\">"
+             "<rect width=\"%d\" height=\"%d\" fill=\"#fff\"/>",
+             full, full, full, full);
+
+  for (int y = 0; y < size; y++) {
+    for (int x = 0; x < size; x++) {
+      if (qrcodegen_getModule (qrcode, x, y)) {
+        sb_printf (sb, "<rect x=\"%d\" y=\"%d\" width=\"1\" height=\"1\"/>",
+                   x + margin, y + margin);
+      }
+    }
+  }
+  sb_printf (sb, "</svg>");
+}
+
+static void format_ipv4 (char *buf, int bufsz, unsigned ip) {
+  snprintf (buf, bufsz, "%u.%u.%u.%u",
+            ip >> 24, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
+}
+
+static void mtfront_prepare_link_page (stats_buffer_t *sb,
+                                       const char *host, int host_len) {
+  char server[256];
+  int slen = host_len;
+  if (slen >= (int)sizeof (server)) {
+    slen = sizeof (server) - 1;
+  }
+  memcpy (server, host, slen);
+  server[slen] = '\0';
+
+  /* Strip port suffix (e.g., "1.2.3.4:8888" -> "1.2.3.4") */
+  char *colon = strrchr (server, ':');
+  if (colon && strchr (server, '.')) {
+    *colon = '\0';
+  }
+  /* For IPv6 [::1]:8888, strip bracket+port */
+  if (server[0] == '[') {
+    char *bracket = strchr (server, ']');
+    if (bracket) {
+      *bracket = '\0';
+      memmove (server, server + 1, strlen (server + 1) + 1);
+    }
+  }
+
+  /* Fix unreachable Host values: loopback and Docker-internal IPs */
+  if (!strcmp (server, "localhost")) {
+    format_ipv4 (server, sizeof (server), get_external_ipv4 ());
+  } else {
+    unsigned ip = parse_text_ipv4 (server);
+    if (ip) {
+      unsigned translated = nat_translate_ip (ip);
+      if (translated != ip) {
+        format_ipv4 (server, sizeof (server), translated);
+      } else if ((ip >> 24) == 127) {
+        format_ipv4 (server, sizeof (server), get_external_ipv4 ());
+      }
+    }
+  }
+
+  int port = http_port[0];
+
+  sb_printf (sb,
+    "<!DOCTYPE html><html><head>"
+    "<meta charset=\"utf-8\">"
+    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+    "<title>Teleproxy</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0}"
+    "body{font-family:system-ui,-apple-system,sans-serif;background:#f5f5f5;"
+    "min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2rem 1rem}"
+    ".card{background:#fff;border-radius:12px;padding:1.5rem;margin:1rem 0;"
+    "box-shadow:0 1px 3px rgba(0,0,0,.1);text-align:center;width:100%%;max-width:400px}"
+    ".card svg{width:100%%;max-width:280px;height:auto;margin:1rem auto;display:block}"
+    ".label{font-size:.85rem;font-weight:600;color:#666;margin-bottom:.5rem}"
+    ".url{word-break:break-all;font-size:.8rem;color:#0066cc;text-decoration:none;"
+    "display:block;margin-top:.75rem}"
+    ".url:hover{text-decoration:underline}"
+    "h1{font-size:1.25rem;color:#333;margin-bottom:.5rem}"
+    "p.hint{font-size:.8rem;color:#999}"
+    "</style></head><body>"
+    "<h1>Connection Links</h1>"
+    "<p class=\"hint\">Tap a QR code to open in Telegram</p>\n");
+
+  int n = toml_cfg.secret_count;
+  for (int i = 0; i < n; i++) {
+    char secret_hex[1024];
+    int pos = 0;
+
+    if (toml_cfg.domain_count > 0 && toml_cfg.domains[0][0]) {
+      pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos, "ee");
+      for (int j = 0; j < 16; j++) {
+        pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
+                         "%02x", toml_cfg.secrets[i].key[j]);
+      }
+      const char *dom = toml_cfg.domains[0];
+      const char *dom_colon = strchr (dom, ':');
+      int dom_len = dom_colon ? (int)(dom_colon - dom) : (int)strlen (dom);
+      for (int j = 0; j < dom_len; j++) {
+        pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
+                         "%02x", (unsigned char)dom[j]);
+      }
+    } else if (toml_cfg.random_padding_only == 1) {
+      pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos, "dd");
+      for (int j = 0; j < 16; j++) {
+        pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
+                         "%02x", toml_cfg.secrets[i].key[j]);
+      }
+    } else {
+      for (int j = 0; j < 16; j++) {
+        pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
+                         "%02x", toml_cfg.secrets[i].key[j]);
+      }
+    }
+
+    char url[2048];
+    snprintf (url, sizeof (url),
+              "https://t.me/proxy?server=%s&port=%d&secret=%s",
+              server, port, secret_hex);
+
+    char tg_url[2048];
+    snprintf (tg_url, sizeof (tg_url),
+              "tg://proxy?server=%s&port=%d&secret=%s",
+              server, port, secret_hex);
+
+    sb_printf (sb, "<div class=\"card\">\n");
+    if (toml_cfg.secrets[i].label[0]) {
+      sb_printf (sb, "<div class=\"label\">%s</div>\n", toml_cfg.secrets[i].label);
+    }
+    sb_printf (sb, "<a href=\"%s\">", tg_url);
+    sb_qr_svg (sb, url);
+    sb_printf (sb, "</a>\n");
+    sb_printf (sb, "<a class=\"url\" href=\"%s\">%s</a>\n", tg_url, url);
+    sb_printf (sb, "</div>\n");
+  }
+
+  if (n == 0) {
+    sb_printf (sb, "<div class=\"card\"><p>No secrets configured</p></div>\n");
+  }
+
+  sb_printf (sb, "</body></html>\n");
+}
+
 void mtfront_pre_loop (void) {
   int i, enable_ipv6 = (ipv6_enabled && !engine_state->settings_addr.s_addr) ? SM_IPV6 : 0;
   if (domain_count == 0) {
@@ -2512,14 +2826,20 @@ static void apply_toml_secrets (struct toml_config *cfg) {
   unsigned char keys[TOML_CONFIG_MAX_SECRETS][16];
   char labels[TOML_CONFIG_MAX_SECRETS][EXT_SECRET_LABEL_MAX + 1];
   int limits[TOML_CONFIG_MAX_SECRETS];
+  long long quotas[TOML_CONFIG_MAX_SECRETS];
+  int max_ips[TOML_CONFIG_MAX_SECRETS];
+  int64_t expires[TOML_CONFIG_MAX_SECRETS];
 
   for (int i = 0; i < cfg->secret_count; i++) {
     memcpy (keys[i], cfg->secrets[i].key, 16);
     snprintf (labels[i], sizeof (labels[i]), "%s", cfg->secrets[i].label);
     limits[i] = cfg->secrets[i].limit;
+    quotas[i] = cfg->secrets[i].quota;
+    max_ips[i] = cfg->secrets[i].max_ips;
+    expires[i] = cfg->secrets[i].expires;
   }
 
-  tcp_rpcs_reload_ext_secrets (keys, labels, limits, cfg->secret_count);
+  tcp_rpcs_reload_ext_secrets (keys, labels, limits, quotas, max_ips, expires, cfg->secret_count);
 }
 
 static void mtfront_sighup_handler (void) {
@@ -2551,6 +2871,7 @@ static void mtfront_sighup_handler (void) {
 
 void usage (void) {
   printf ("usage: %s [options] [relay-config]\n", progname);
+  printf ("       %s check [--config FILE] [--direct] [-S SECRET] [-D DOMAIN]\n", progname);
   printf ("       %s generate-secret [domain]\n", progname);
   printf ("%s\n", FullVersionStr);
   printf ("\tMTProto proxy for Telegram\n");
@@ -2698,7 +3019,7 @@ int f_parse_option (int val) {
         }
       }
       if (val == 'S') {
-	tcp_rpcs_set_ext_secret (secret, label, conn_limit);
+	tcp_rpcs_set_ext_secret (secret, label, conn_limit, 0, 0, 0);
 	secret_count++;
       } else {
 	memcpy (proxy_tag, secret, sizeof (proxy_tag));
@@ -2790,6 +3111,13 @@ int f_parse_option (int val) {
     ip_stats_top_n = atoi (optarg);
     if (ip_stats_top_n < 0) ip_stats_top_n = 0;
     break;
+  case 2009:
+    if (socks5_set_proxy (optarg) < 0) {
+      kprintf ("invalid SOCKS5 URL: %s\n", optarg);
+      kprintf ("expected: socks5://[user:pass@]host:port\n");
+      usage ();
+    }
+    break;
   default:
     return -1;
   }
@@ -2816,6 +3144,7 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("config", required_argument, 0, 2006, "path to TOML config file (reloaded on SIGHUP for secrets/ACLs)");
   parse_option ("geoip-db", required_argument, 0, 2007, "path to MaxMind GeoLite2-City.mmdb or GeoLite2-Country.mmdb for country metrics");
   parse_option ("ip-stats-top", required_argument, 0, 2008, "number of top IPs to expose in /metrics (default 100)");
+  parse_option ("socks5", required_argument, 0, 2009, "route upstream DC connections through SOCKS5 proxy (socks5://[user:pass@]host:port)");
 }
 
 void mtfront_parse_extra_args (int argc, char *argv[]) /* {{{ */ {
@@ -2906,6 +3235,12 @@ void mtfront_pre_init (void) {
         exit (1);
       }
     }
+    if (toml_cfg.socks5[0] && !socks5_is_enabled ()) {
+      if (socks5_set_proxy (toml_cfg.socks5) < 0) {
+        kprintf ("config error: invalid socks5 URL '%s'\n", toml_cfg.socks5);
+        exit (1);
+      }
+    }
     if (toml_cfg.ipv6 == 1) {
       engine_enable_ipv6 ();
     }
@@ -2923,6 +3258,11 @@ void mtfront_pre_init (void) {
 
   if (direct_mode && proxy_tag_set) {
     kprintf ("--direct and -P (proxy tag) are mutually exclusive\n");
+    exit (2);
+  }
+
+  if (socks5_is_enabled () && !direct_mode) {
+    kprintf ("--socks5 requires --direct mode\n");
     exit (2);
   }
 
@@ -3108,6 +3448,12 @@ static int cmd_generate_secret (int argc, char *argv[]) {
 
 int main (int argc, char *argv[]) {
   /* Subcommand dispatch — checked before engine init */
+  if (argc >= 2 && !strcmp (argv[1], "check")) {
+    return cmd_check (argc - 1, argv + 1);
+  }
+  if (argc >= 2 && !strcmp (argv[1], "link")) {
+    return cmd_link (argc - 1, argv + 1);
+  }
   if (argc >= 2 && !strcmp (argv[1], "generate-secret")) {
     return cmd_generate_secret (argc - 2, argv + 2);
   }

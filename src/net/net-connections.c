@@ -327,8 +327,12 @@ void connection_write_close (connection_job_t C) /* {{{ */ {
 
 /* qack {{{ */
 static inline void disable_qack (int fd) {
+#if TCP_QUICKACK
   vkprintf (2, "disable TCP_QUICKACK for %d\n", fd);
   assert (setsockopt (fd, IPPROTO_TCP, TCP_QUICKACK, (int[]){0}, sizeof (int)) >= 0);
+#else
+  (void)fd;
+#endif
 }
 /* }}} */
 
@@ -2188,6 +2192,13 @@ int net_add_nat_info (char *str) {
   nat_info[nat_info_rules][0] = ntohl (l_addr.s_addr);
   nat_info[nat_info_rules][1] = ntohl (g_addr.s_addr);
   return nat_info_rules++;
+}
+
+unsigned get_external_ipv4 (void) {
+  if (nat_info_rules > 0) {
+    return nat_info[0][1];
+  }
+  return get_my_ipv4 ();
 }
 
 unsigned nat_translate_ip (unsigned local_ip) {
