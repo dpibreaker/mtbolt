@@ -1,4 +1,4 @@
-/* src/mtproto/mtbolt-config.c — MTBolt runtime configuration implementation */
+/* src/mtproto/mtbolt-config.c — MTBolt runtime configuration */
 
 #include <errno.h>
 #include <stdio.h>
@@ -9,20 +9,17 @@
 #include "common/toml/tomlc17.h"
 #include "kprintf.h"
 
-/* Global config instance */
 struct mtbolt_config mtbolt_cfg;
 
 void mtbolt_config_defaults (struct mtbolt_config *cfg) {
   memset (cfg, 0, sizeof (*cfg));
 
-  /* [network] */
   cfg->max_connections     = 10485760;
   cfg->max_targets         = 10485760;
   cfg->backlog             = 131072;
   cfg->tcp_defer_accept    = 3;
   cfg->window_clamp        = 131072;
 
-  /* [buffers] */
   cfg->max_allocated_bytes = 16LL * 1024 * 1024 * 1024;
   cfg->std_buffer          = 2048;
   cfg->small_buffer        = 512;
@@ -30,73 +27,66 @@ void mtbolt_config_defaults (struct mtbolt_config *cfg) {
   cfg->chunk_size          = (1L << 21) - 64;
   cfg->max_connection_buffer = 1 << 25;
 
-  /* [timeouts] */
   cfg->handshake       = 5.0;
   cfg->rpc             = 5.0;
   cfg->ping_interval   = 5.0;
   cfg->connect         = 3.0;
   cfg->http_max_wait   = 960.0;
 
-  /* [geoip] */
   cfg->geoip_enabled     = 1;
   cfg->geoip_database[0] = '\0';
   cfg->geoip_ht_size     = 1 << 22;
   cfg->geoip_max_regions = 128;
 
-  /* [workers] */
   cfg->workers = 0;
 
-  /* [stats] */
   cfg->stats_http_enabled = 0;
   cfg->stats_buffer_size  = 1 << 20;
 }
 
-/* Helper: read an int from a TOML table if present */
-static void read_int (toml_table_t *t, const char *key, int *dst) {
-  toml_value_t v = toml_table_int (t, key);
-  if (v.ok) {
-    *dst = (int) v.u.i;
+/* Helpers: read typed values from a toml_datum_t table if key exists */
+
+static void cfg_read_int (toml_datum_t tab, const char *key, int *dst) {
+  toml_datum_t v = toml_get (tab, key);
+  if (v.type == TOML_INT64) {
+    *dst = (int) v.u.int64;
   }
 }
 
-/* Helper: read a long long from a TOML table if present */
-static void read_llong (toml_table_t *t, const char *key, long long *dst) {
-  toml_value_t v = toml_table_int (t, key);
-  if (v.ok) {
-    *dst = (long long) v.u.i;
+static void cfg_read_llong (toml_datum_t tab, const char *key, long long *dst) {
+  toml_datum_t v = toml_get (tab, key);
+  if (v.type == TOML_INT64) {
+    *dst = (long long) v.u.int64;
   }
 }
 
-/* Helper: read a long from a TOML table if present */
-static void read_long (toml_table_t *t, const char *key, long *dst) {
-  toml_value_t v = toml_table_int (t, key);
-  if (v.ok) {
-    *dst = (long) v.u.i;
+static void cfg_read_long (toml_datum_t tab, const char *key, long *dst) {
+  toml_datum_t v = toml_get (tab, key);
+  if (v.type == TOML_INT64) {
+    *dst = (long) v.u.int64;
   }
 }
 
-/* Helper: read a double from a TOML table if present */
-static void read_double (toml_table_t *t, const char *key, double *dst) {
-  toml_value_t v = toml_table_double (t, key);
-  if (v.ok) {
-    *dst = v.u.d;
+static void cfg_read_double (toml_datum_t tab, const char *key, double *dst) {
+  toml_datum_t v = toml_get (tab, key);
+  if (v.type == TOML_FP64) {
+    *dst = v.u.fp64;
+  } else if (v.type == TOML_INT64) {
+    *dst = (double) v.u.int64;
   }
 }
 
-/* Helper: read a bool as int from a TOML table if present */
-static void read_bool (toml_table_t *t, const char *key, int *dst) {
-  toml_value_t v = toml_table_bool (t, key);
-  if (v.ok) {
-    *dst = v.u.b ? 1 : 0;
+static void cfg_read_bool (toml_datum_t tab, const char *key, int *dst) {
+  toml_datum_t v = toml_get (tab, key);
+  if (v.type == TOML_BOOLEAN) {
+    *dst = v.u.boolean ? 1 : 0;
   }
 }
 
-/* Helper: read a string into a fixed buffer */
-static void read_string (toml_table_t *t, const char *key, char *dst, int maxlen) {
-  toml_value_t v = toml_table_string (t, key);
-  if (v.ok) {
+static void cfg_read_string (toml_datum_t tab, const char *key, char *dst, int maxlen) {
+  toml_datum_t v = toml_get (tab, key);
+  if (v.type == TOML_STRING) {
     snprintf (dst, maxlen, "%s", v.u.s);
-    free (v.u.s);
   }
 }
 
@@ -108,114 +98,102 @@ int mtbolt_config_load_toml (struct mtbolt_config *cfg, const char *path,
     return -1;
   }
 
-  toml_table_t *root = toml_parse_file (fp, errbuf, errlen);
+  toml_result_t res = toml_parse_file (fp);
   fclose (fp);
 
-  if (!root) {
+  if (!res.ok) {
+    snprintf (errbuf, errlen, "TOML parse error: %s", res.errmsg);
     return -1;
   }
 
-  toml_table_t *sec;
+  toml_datum_t sec;
 
   /* [network] */
-  sec = toml_table_table (root, "network");
-  if (sec) {
-    read_int (sec, "max_connections", &cfg->max_connections);
-    read_int (sec, "max_targets",     &cfg->max_targets);
-    read_int (sec, "backlog",         &cfg->backlog);
-    read_int (sec, "tcp_defer_accept", &cfg->tcp_defer_accept);
-    read_int (sec, "window_clamp",    &cfg->window_clamp);
+  sec = toml_get (res.toptab, "network");
+  if (sec.type == TOML_TABLE) {
+    cfg_read_int (sec, "max_connections", &cfg->max_connections);
+    cfg_read_int (sec, "max_targets",     &cfg->max_targets);
+    cfg_read_int (sec, "backlog",         &cfg->backlog);
+    cfg_read_int (sec, "tcp_defer_accept", &cfg->tcp_defer_accept);
+    cfg_read_int (sec, "window_clamp",    &cfg->window_clamp);
   }
 
   /* [buffers] */
-  sec = toml_table_table (root, "buffers");
-  if (sec) {
-    read_llong (sec, "max_allocated_bytes", &cfg->max_allocated_bytes);
-    read_int   (sec, "std_buffer",          &cfg->std_buffer);
-    read_int   (sec, "small_buffer",        &cfg->small_buffer);
-    read_int   (sec, "tiny_buffer",         &cfg->tiny_buffer);
-    read_long  (sec, "chunk_size",          &cfg->chunk_size);
-    read_int   (sec, "max_connection_buffer", &cfg->max_connection_buffer);
+  sec = toml_get (res.toptab, "buffers");
+  if (sec.type == TOML_TABLE) {
+    cfg_read_llong (sec, "max_allocated_bytes", &cfg->max_allocated_bytes);
+    cfg_read_int   (sec, "std_buffer",          &cfg->std_buffer);
+    cfg_read_int   (sec, "small_buffer",        &cfg->small_buffer);
+    cfg_read_int   (sec, "tiny_buffer",         &cfg->tiny_buffer);
+    cfg_read_long  (sec, "chunk_size",          &cfg->chunk_size);
+    cfg_read_int   (sec, "max_connection_buffer", &cfg->max_connection_buffer);
   }
 
   /* [timeouts] */
-  sec = toml_table_table (root, "timeouts");
-  if (sec) {
-    read_double (sec, "handshake",     &cfg->handshake);
-    read_double (sec, "rpc",           &cfg->rpc);
-    read_double (sec, "ping_interval", &cfg->ping_interval);
-    read_double (sec, "connect",       &cfg->connect);
-    read_double (sec, "http_max_wait", &cfg->http_max_wait);
+  sec = toml_get (res.toptab, "timeouts");
+  if (sec.type == TOML_TABLE) {
+    cfg_read_double (sec, "handshake",     &cfg->handshake);
+    cfg_read_double (sec, "rpc",           &cfg->rpc);
+    cfg_read_double (sec, "ping_interval", &cfg->ping_interval);
+    cfg_read_double (sec, "connect",       &cfg->connect);
+    cfg_read_double (sec, "http_max_wait", &cfg->http_max_wait);
   }
 
   /* [geoip] */
-  sec = toml_table_table (root, "geoip");
-  if (sec) {
-    read_bool   (sec, "enabled",     &cfg->geoip_enabled);
-    read_string (sec, "database",    cfg->geoip_database, sizeof (cfg->geoip_database));
-    read_int    (sec, "ht_size",     &cfg->geoip_ht_size);
-    read_int    (sec, "max_regions", &cfg->geoip_max_regions);
+  sec = toml_get (res.toptab, "geoip");
+  if (sec.type == TOML_TABLE) {
+    cfg_read_bool   (sec, "enabled",     &cfg->geoip_enabled);
+    cfg_read_string (sec, "database",    cfg->geoip_database, sizeof (cfg->geoip_database));
+    cfg_read_int    (sec, "ht_size",     &cfg->geoip_ht_size);
+    cfg_read_int    (sec, "max_regions", &cfg->geoip_max_regions);
   }
 
   /* [workers] */
-  sec = toml_table_table (root, "workers");
-  if (sec) {
-    read_int (sec, "count", &cfg->workers);
+  sec = toml_get (res.toptab, "workers");
+  if (sec.type == TOML_TABLE) {
+    cfg_read_int (sec, "count", &cfg->workers);
   }
 
   /* [stats] */
-  sec = toml_table_table (root, "stats");
-  if (sec) {
-    read_bool (sec, "http_enabled", &cfg->stats_http_enabled);
-    read_int  (sec, "buffer_size",  &cfg->stats_buffer_size);
+  sec = toml_get (res.toptab, "stats");
+  if (sec.type == TOML_TABLE) {
+    cfg_read_bool (sec, "http_enabled", &cfg->stats_http_enabled);
+    cfg_read_int  (sec, "buffer_size",  &cfg->stats_buffer_size);
   }
 
-  toml_free (root);
+  toml_free (res);
   return 0;
 }
 
 int mtbolt_config_validate (struct mtbolt_config *cfg, char *errbuf, int errlen) {
 #define FAIL(...) do { snprintf (errbuf, errlen, __VA_ARGS__); return -1; } while (0)
 
-  if (cfg->max_connections < 1) {
+  if (cfg->max_connections < 1)
     FAIL ("max_connections must be >= 1 (got %d)", cfg->max_connections);
-  }
-  if (cfg->max_targets < 1) {
+  if (cfg->max_targets < 1)
     FAIL ("max_targets must be >= 1 (got %d)", cfg->max_targets);
-  }
-  if (cfg->backlog < 1) {
+  if (cfg->backlog < 1)
     FAIL ("backlog must be >= 1 (got %d)", cfg->backlog);
-  }
-  if (cfg->tcp_defer_accept < 0) {
+  if (cfg->tcp_defer_accept < 0)
     FAIL ("tcp_defer_accept must be >= 0 (got %d)", cfg->tcp_defer_accept);
-  }
-  if (cfg->max_allocated_bytes < (1LL << 20)) {
+  if (cfg->max_allocated_bytes < (1LL << 20))
     FAIL ("max_allocated_bytes must be >= 1MB (got %lld)", cfg->max_allocated_bytes);
-  }
-  if (cfg->handshake <= 0) {
+  if (cfg->handshake <= 0)
     FAIL ("handshake timeout must be > 0 (got %.3f)", cfg->handshake);
-  }
-  if (cfg->rpc <= 0) {
+  if (cfg->rpc <= 0)
     FAIL ("rpc timeout must be > 0 (got %.3f)", cfg->rpc);
-  }
-  if (cfg->ping_interval <= 0) {
+  if (cfg->ping_interval <= 0)
     FAIL ("ping_interval must be > 0 (got %.3f)", cfg->ping_interval);
-  }
-  if (cfg->connect <= 0) {
+  if (cfg->connect <= 0)
     FAIL ("connect timeout must be > 0 (got %.3f)", cfg->connect);
-  }
-  if (cfg->geoip_ht_size < 1024) {
+  if (cfg->geoip_ht_size < 1024)
     FAIL ("geoip_ht_size must be >= 1024 (got %d)", cfg->geoip_ht_size);
-  }
-  if ((cfg->geoip_ht_size & (cfg->geoip_ht_size - 1)) != 0) {
+  if ((cfg->geoip_ht_size & (cfg->geoip_ht_size - 1)) != 0)
     FAIL ("geoip_ht_size must be a power of 2 (got %d)", cfg->geoip_ht_size);
-  }
-  if (cfg->geoip_max_regions < 1 || cfg->geoip_max_regions > 1024) {
+  if (cfg->geoip_max_regions < 1 || cfg->geoip_max_regions > 1024)
     FAIL ("geoip_max_regions must be 1..1024 (got %d)", cfg->geoip_max_regions);
-  }
-  if (cfg->stats_buffer_size < 4096) {
+  if (cfg->stats_buffer_size < 4096)
     FAIL ("stats_buffer_size must be >= 4096 (got %d)", cfg->stats_buffer_size);
-  }
 
 #undef FAIL
   return 0;
