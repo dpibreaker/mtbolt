@@ -1,0 +1,38 @@
+# MTBolt Configuration
+# All values shown are defaults. Uncomment and modify as needed.
+# CLI flags override TOML values. TOML overrides compiled defaults.
+
+[network]
+# max_connections = 10485760     # Max simultaneous client connections
+# max_targets = 10485760         # Max upstream target connections
+# backlog = 131072               # listen() backlog queue size
+# tcp_defer_accept = 3           # Seconds to wait for data after TCP handshake (0 = disable)
+# window_clamp = 131072          # TCP window clamp for client connections
+
+[buffers]
+# max_allocated_bytes = 17179869184  # 16GB — max memory for message buffer pool
+# std_buffer = 2048                  # Standard buffer size (compile-time, informational)
+# small_buffer = 512                 # Small buffer size (compile-time, informational)
+# tiny_buffer = 48                   # Tiny buffer size (compile-time, informational)
+# chunk_size = 2097088               # Buffer chunk allocation size (2MB - 64)
+# max_connection_buffer = 33554432   # 32MB — per-connection buffer limit
+
+[timeouts]
+# handshake = 5.0        # MTProto handshake timeout (seconds)
+# rpc = 5.0              # RPC response timeout (seconds)
+# ping_interval = 5.0    # Keepalive ping interval (seconds)
+# connect = 3.0          # Upstream DC connect timeout (seconds)
+# http_max_wait = 960.0  # HTTP long-poll max wait (seconds)
+
+[geoip]
+# enabled = true
+# database = "/etc/geoip/GeoLite2-City.mmdb"
+# ht_size = 4194304      # Hash table slots for IP tracking (must be power of 2)
+# max_regions = 128      # Max tracked sub-country regions
+
+[workers]
+# count = 0              # Worker processes (0 = single process, -M flag equivalent)
+
+[stats]
+# http_enabled = false   # Enable HTTP stats endpoint (--http-stats equivalent)
+# buffer_size = 1048576  # 1MB — stats response buffer size
