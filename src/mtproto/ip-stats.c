@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 
 #include "ip-stats.h"
+#include "mtbolt-config.h"
 #include "kprintf.h"
 
 #ifdef HAVE_MAXMINDDB
@@ -22,9 +23,8 @@
 
 /* ---- Shared memory hash table ---- */
 
-/* Fixed size — mmap pages are lazy, only touched pages consume RAM.
-   4M slots × 104 bytes = 416MB virtual, but real RSS only for used slots. */
-#define IP_HT_SIZE       (1 << 22)   /* 4M slots */
+/* Size from config — mmap pages are lazy, only touched pages consume RAM. */
+#define IP_HT_SIZE       (mtbolt_cfg.geoip_ht_size)
 #define IP_HT_MASK       (IP_HT_SIZE - 1)
 
 struct ip_ht_slot {
@@ -42,7 +42,8 @@ struct ip_ht_slot {
 /* Shared state — lives in mmap(MAP_SHARED) */
 struct ip_stats_shared {
   int used;  /* approximate, not exact under concurrency */
-  struct ip_ht_slot ht[IP_HT_SIZE];
+  int ht_size;
+  struct ip_ht_slot ht[];  /* flexible array member */
 };
 
 struct country_stats_shared {
@@ -56,11 +57,12 @@ struct region_stats_entry {
   long long total_ips;
 };
 
-#define MAX_REGIONS 128
+#define MAX_REGIONS (mtbolt_cfg.geoip_max_regions)
 
 struct region_stats_shared {
   int count;
-  struct region_stats_entry entries[MAX_REGIONS];
+  int max_regions;
+  struct region_stats_entry entries[];  /* flexible array member */
 };
 
 static struct ip_stats_shared *shared;
@@ -203,12 +205,14 @@ static struct geoip_result geoip_lookup (uint32_t ip) {
 
 void ip_stats_init (void) {
   /* mmap shared anonymous — survives fork, all workers see same data */
-  shared = mmap (NULL, sizeof (struct ip_stats_shared),
+  size_t ht_bytes = sizeof (struct ip_stats_shared) + (size_t) IP_HT_SIZE * sizeof (struct ip_ht_slot);
+  shared = mmap (NULL, ht_bytes,
                  PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (shared == MAP_FAILED) {
     kprintf ("ip_stats: mmap failed for hash table\n");
     exit (1);
   }
+  shared->ht_size = IP_HT_SIZE;
 
   countries_shared = mmap (NULL, sizeof (struct country_stats_shared),
                            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -217,15 +221,17 @@ void ip_stats_init (void) {
     exit (1);
   }
 
-  regions_shared = mmap (NULL, sizeof (struct region_stats_shared),
+  size_t region_bytes = sizeof (struct region_stats_shared) + (size_t) MAX_REGIONS * sizeof (struct region_stats_entry);
+  regions_shared = mmap (NULL, region_bytes,
                          PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (regions_shared == MAP_FAILED) {
     kprintf ("ip_stats: mmap failed for regions\n");
     exit (1);
   }
+  regions_shared->max_regions = MAX_REGIONS;
 
   kprintf ("ip_stats: shared hash table %d slots (%ld MB virtual)\n",
-           IP_HT_SIZE, (long) sizeof (struct ip_stats_shared) / (1024 * 1024));
+           IP_HT_SIZE, (long) ht_bytes / (1024 * 1024));
 }
 
 int ip_stats_geoip_load (const char *mmdb_path) {

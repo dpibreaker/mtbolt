@@ -46,6 +46,7 @@
 #include "kprintf.h"
 #include "precise-time.h"
 #include "vv/vv-io.h"
+#include "mtproto/mtbolt-config.h"
 
 
 /*
@@ -634,8 +635,10 @@ int server_socket (int port, struct in_addr in_addr, int backlog, int mode) {
   if (!(mode & SM_UDP)) {
     /* Drop connections that complete TCP handshake but send no data within 3 seconds.
        Kernel handles this before accept() — zero overhead for teleproxy. */
-    int defer = 3;
-    setsockopt (socket_fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof (defer));
+    if (mtbolt_cfg.tcp_defer_accept > 0) {
+      int defer = mtbolt_cfg.tcp_defer_accept;
+      setsockopt (socket_fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer, sizeof (defer));
+    }
   }
   if (!(mode & SM_UDP)) {
     int qlen = 256;

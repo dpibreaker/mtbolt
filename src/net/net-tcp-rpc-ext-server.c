@@ -56,6 +56,7 @@
 #include "mtproto/mtproto-dc-table.h"
 
 #include "vv/vv-io.h"
+#include "mtproto/mtbolt-config.h"
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -2042,7 +2043,7 @@ static int tcp_rpcs_ext_drs_alarm (connection_job_t C) {
 }
 
 int tcp_rpcs_ext_init_accepted (connection_job_t C) {
-  job_timer_insert (C, precise_now + 5);  /* 5s handshake timeout */
+  job_timer_insert (C, precise_now + mtbolt_cfg.handshake);  /* configurable handshake timeout */
   return tcp_rpcs_init_accepted_nohs (C);
 }
 
