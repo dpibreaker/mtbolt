@@ -97,7 +97,7 @@ ALLDIRS := ${DEPDIRS} ${OBJDIRS}
 
 .PHONY:	all clean lint test-dc-lookup fuzz fuzz-run
 
-EXELIST	:= ${EXE}/teleproxy
+EXELIST	:= ${EXE}/mtbolt
 
 
 OBJECTS	=	\
@@ -161,7 +161,7 @@ ${LIB_OBJS_NORMAL}: ${OBJ}/%.o: %.c | create_dirs_and_headers
 
 ${EXELIST}: ${LIBLIST}
 
-${EXE}/teleproxy:	${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/ip-stats.o ${OBJ}/src/mtproto/mtproto-check.o ${OBJ}/src/mtproto/mtproto-link.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o
+${EXE}/mtbolt:	${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/ip-stats.o ${OBJ}/src/mtproto/mtproto-check.o ${OBJ}/src/mtproto/mtproto-link.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o ${OBJ}/src/mtproto/mtbolt-config.o
 	${CC} -o $@ $^ ${LDFLAGS}
 
 ${LIB}/libkdb.a: ${LIB_OBJS}
