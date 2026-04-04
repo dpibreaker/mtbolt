@@ -76,6 +76,7 @@
 #include "net/net-tcp-drs.h"
 #include "common/toml-config.h"
 #include "mtproto/ip-stats.h"
+#include "mtbolt-config.h"
 
 #ifndef COMMIT
 #define COMMIT "unknown"
@@ -98,21 +99,21 @@ const char FullVersionStr[] = VERSION_STR " compiled at " __DATE__ " " __TIME__ 
 #define EXT_CONN_HASH_SHIFT	20
 #define EXT_CONN_HASH_SIZE	(1 << EXT_CONN_HASH_SHIFT)
 
-#define	RPC_TIMEOUT_INTERVAL	5.0
+#define	RPC_TIMEOUT_INTERVAL	(mtbolt_cfg.rpc)
 
 #define	MAX_HTTP_LISTEN_PORTS	128
 
-#define	HTTP_MAX_WAIT_TIMEOUT	960.0
+#define	HTTP_MAX_WAIT_TIMEOUT	(mtbolt_cfg.http_max_wait)
 
-#define PING_INTERVAL 5.0
-#define STOP_INTERVAL (2 * ping_interval)
-#define FAIL_INTERVAL (20 * ping_interval)
-#define RESPONSE_FAIL_TIMEOUT 5
-#define CONNECT_TIMEOUT 3
+#define PING_INTERVAL (mtbolt_cfg.ping_interval)
+#define STOP_INTERVAL (2 * mtbolt_cfg.ping_interval)
+#define FAIL_INTERVAL (20 * mtbolt_cfg.ping_interval)
+#define RESPONSE_FAIL_TIMEOUT ((int)mtbolt_cfg.rpc)
+#define CONNECT_TIMEOUT ((int)mtbolt_cfg.connect)
 
 #define	MAX_POST_SIZE	(262144 * 4 - 4096)
 
-#define	DEFAULT_WINDOW_CLAMP	131072
+#define	DEFAULT_WINDOW_CLAMP	(mtbolt_cfg.window_clamp)
 
 // #define DEFAULT_OUTBOUND_CONNECTION_CREATION_RATE	1000000
 
@@ -120,11 +121,10 @@ const char FullVersionStr[] = VERSION_STR " compiled at " __DATE__ " " __TIME__ 
 #define	MAX_CONNECTION_BUFFER_SPACE	(1 << 10) //(1 << 25)
 #define MAX_MTFRONT_NB			1 //((NB_max * 3) >> 2)
 #else
-#define	MAX_CONNECTION_BUFFER_SPACE	(1 << 25)
+#define	MAX_CONNECTION_BUFFER_SPACE	(mtbolt_cfg.max_connection_buffer)
 #define MAX_MTFRONT_NB			((NB_max * 3) >> 2)
 #endif
 
-static double ping_interval = PING_INTERVAL;
 static int window_clamp;
 
 #define	PROXY_MODE_OUT	2
@@ -149,10 +149,10 @@ static int ip_stats_top_n = 100;
 
 volatile int sigpoll_cnt;
 
-#define STATS_BUFF_SIZE	(1 << 20)
+int stats_buff_size;
+char *stats_buff;
 
 int stats_buff_len;
-char stats_buff[STATS_BUFF_SIZE];
 
 
 // current HTTP query headers
@@ -2896,6 +2896,7 @@ int f_parse_option (int val) {
     break;
   case 'W':
     window_clamp = atoi (optarg);
+    mtbolt_cfg.window_clamp = window_clamp;
     break;
   case 'H':
     ptr = optarg;
@@ -2929,16 +2930,18 @@ int f_parse_option (int val) {
   case 'M':
     workers = atoi (optarg);
     assert (workers >= 0 && workers <= MAX_WORKERS);
+    mtbolt_cfg.workers = workers;
     break;
   case 'T':
-    ping_interval = atof (optarg);
-    if (ping_interval <= 0) {
-      ping_interval = PING_INTERVAL;
+    mtbolt_cfg.ping_interval = atof (optarg);
+    if (mtbolt_cfg.ping_interval <= 0) {
+      mtbolt_cfg.ping_interval = 5.0;
     }
     break;
   case 2000:
     engine_set_http_fallback (&ct_http_server, &http_methods_stats);
     mtproto_front_functions.flags &= ~ENGINE_NO_PORT;
+    mtbolt_cfg.stats_http_enabled = 1;
     break;
   case 'D':
     tcp_rpc_add_proxy_domain (optarg);
@@ -3106,6 +3109,7 @@ int f_parse_option (int val) {
     break;
   case 2007:
     geoip_db_path = strdup (optarg);
+    snprintf (mtbolt_cfg.geoip_database, sizeof (mtbolt_cfg.geoip_database), "%s", optarg);
     break;
   case 2008:
     ip_stats_top_n = atoi (optarg);
@@ -3118,6 +3122,19 @@ int f_parse_option (int val) {
       usage ();
     }
     break;
+  case 2100: mtbolt_cfg.max_connections = atoi (optarg); break;
+  case 2101: mtbolt_cfg.max_targets = atoi (optarg); break;
+  case 2102: mtbolt_cfg.backlog = atoi (optarg); break;
+  case 2103: mtbolt_cfg.tcp_defer_accept = atoi (optarg); break;
+  case 2104: mtbolt_cfg.max_allocated_bytes = atoll (optarg); break;
+  case 2105: mtbolt_cfg.handshake = atof (optarg); break;
+  case 2106: mtbolt_cfg.rpc = atof (optarg); break;
+  case 2107: mtbolt_cfg.connect = atof (optarg); break;
+  case 2108: mtbolt_cfg.http_max_wait = atof (optarg); break;
+  case 2109: mtbolt_cfg.geoip_ht_size = atoi (optarg); break;
+  case 2110: mtbolt_cfg.geoip_max_regions = atoi (optarg); break;
+  case 2111: mtbolt_cfg.stats_buffer_size = atoi (optarg); break;
+  case 2112: mtbolt_cfg.max_connection_buffer = atoi (optarg); break;
   default:
     return -1;
   }
@@ -3145,6 +3162,19 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("geoip-db", required_argument, 0, 2007, "path to MaxMind GeoLite2-City.mmdb or GeoLite2-Country.mmdb for country metrics");
   parse_option ("ip-stats-top", required_argument, 0, 2008, "number of top IPs to expose in /metrics (default 100)");
   parse_option ("socks5", required_argument, 0, 2009, "route upstream DC connections through SOCKS5 proxy (socks5://[user:pass@]host:port)");
+  parse_option ("max-connections", required_argument, 0, 2100, "max simultaneous connections (default 10485760)");
+  parse_option ("max-targets", required_argument, 0, 2101, "max target connections (default 10485760)");
+  parse_option ("backlog", required_argument, 0, 2102, "listen backlog (default 131072)");
+  parse_option ("tcp-defer-accept", required_argument, 0, 2103, "TCP_DEFER_ACCEPT seconds (default 3, 0=disable)");
+  parse_option ("max-allocated-bytes", required_argument, 0, 2104, "max buffer memory bytes (default 16GB)");
+  parse_option ("handshake-timeout", required_argument, 0, 2105, "MTProto handshake timeout (default 5.0)");
+  parse_option ("rpc-timeout", required_argument, 0, 2106, "RPC timeout seconds (default 5.0)");
+  parse_option ("connect-timeout", required_argument, 0, 2107, "upstream connect timeout (default 3.0)");
+  parse_option ("http-max-wait", required_argument, 0, 2108, "HTTP long-poll max wait (default 960.0)");
+  parse_option ("geoip-ht-size", required_argument, 0, 2109, "GeoIP hash table slots (default 4194304)");
+  parse_option ("geoip-max-regions", required_argument, 0, 2110, "max tracked regions (default 128)");
+  parse_option ("stats-buffer-size", required_argument, 0, 2111, "stats response buffer bytes (default 1048576)");
+  parse_option ("max-connection-buffer", required_argument, 0, 2112, "per-connection buffer limit (default 33554432)");
 }
 
 void mtfront_parse_extra_args (int argc, char *argv[]) /* {{{ */ {
@@ -3170,6 +3200,23 @@ void mtfront_pre_init (void) {
   mallopt (M_TRIM_THRESHOLD, 128 * 1024);
   mallopt (M_MMAP_THRESHOLD, 256 * 1024);
 #endif
+  mtbolt_config_defaults (&mtbolt_cfg);
+  if (toml_config_path) {
+    char mcfg_errbuf[512];
+    if (mtbolt_config_load_toml (&mtbolt_cfg, toml_config_path, mcfg_errbuf, sizeof (mcfg_errbuf)) < 0) {
+      kprintf ("mtbolt config error: %s\n", mcfg_errbuf);
+      exit (1);
+    }
+    if (mtbolt_config_validate (&mtbolt_cfg, mcfg_errbuf, sizeof (mcfg_errbuf)) < 0) {
+      kprintf ("mtbolt config validation error: %s\n", mcfg_errbuf);
+      exit (1);
+    }
+  }
+
+  stats_buff_size = mtbolt_cfg.stats_buffer_size;
+  stats_buff = malloc (stats_buff_size);
+  assert (stats_buff);
+
   /* Load TOML config early — sets direct_mode and other options */
   if (toml_config_path) {
     char errbuf[512];
