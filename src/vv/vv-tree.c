@@ -20,6 +20,7 @@
 
 
 #include <assert.h>
+#include <stddef.h>
       
 extern long long total_vv_tree_nodes;
 
