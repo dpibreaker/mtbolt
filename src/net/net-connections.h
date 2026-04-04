@@ -34,9 +34,10 @@
 #include "jobs/jobs.h"
 #include "common/mp-queue.h"
 #include "common/pid.h"
+#include "mtproto/mtbolt-config.h"
 
-#define MAX_CONNECTIONS	10485760
-#define MAX_TARGETS	10485760
+#define MAX_CONNECTIONS	(mtbolt_cfg.max_connections)
+#define MAX_TARGETS	(mtbolt_cfg.max_targets)
 #define PRIME_TARGETS	99961
 #define MAX_SPECIAL_LISTEN_SOCKETS	64
 

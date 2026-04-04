@@ -123,7 +123,8 @@ static inline void mfence (void) {
 //extern struct multicast_host multicast_hosts[];
 //extern int multicast_hosts_num;
 
-#define DEFAULT_BACKLOG 131072
+#include "mtproto/mtbolt-config.h"
+#define DEFAULT_BACKLOG (mtbolt_cfg.backlog)
 #define DEFAULT_ENGINE_USER "teleproxy"
 
 #ifdef __cplusplus
