@@ -121,4 +121,4 @@ fs.nr_open = 10485760
 
 ## Благодарности
 
-Форк [teleproxy](https://github.com/ArsenyMalkov/teleproxy) с улучшениями производительности, безопасности и наблюдаемости.
+Форк [teleproxy](https://github.com/teleproxy/teleproxy) с улучшениями производительности, безопасности и наблюдаемости.

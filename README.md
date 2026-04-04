@@ -121,4 +121,4 @@ Prometheus metrics on the stats port when `--http-stats` is enabled:
 
 ## Credits
 
-Fork of [teleproxy](https://github.com/ArsenyMalkov/teleproxy) with performance, security, and observability enhancements.
+Fork of [teleproxy](https://github.com/teleproxy/teleproxy) with performance, security, and observability enhancements.
