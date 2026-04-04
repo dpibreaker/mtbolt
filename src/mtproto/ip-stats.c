@@ -33,6 +33,7 @@ struct ip_ht_slot {
   long long total_conns;
   /* cached geo — populated once on first connect */
   char cc[4];
+  char region[8];     /* subdivision ISO code, e.g. "MOW", "SPE" */
   char city[64];
   double latitude;
   double longitude;
@@ -49,8 +50,22 @@ struct country_stats_shared {
   struct country_stats_entry entries[256];
 };
 
+struct region_stats_entry {
+  char code[8];        /* e.g. "MOW", "SPE" */
+  int unique_ips;
+  long long total_ips;
+};
+
+#define MAX_REGIONS 128
+
+struct region_stats_shared {
+  int count;
+  struct region_stats_entry entries[MAX_REGIONS];
+};
+
 static struct ip_stats_shared *shared;
 static struct country_stats_shared *countries_shared;
+static struct region_stats_shared *regions_shared;
 
 static inline int ip_ht_hash (uint32_t ip) {
   uint32_t h = ip;
@@ -96,6 +111,26 @@ static struct country_stats_entry *country_find_or_create (const char *code) {
   return e;
 }
 
+static struct region_stats_entry *region_find_or_create (const char *code) {
+  if (!code || !code[0] || !regions_shared) return NULL;
+  struct region_stats_shared *rs = regions_shared;
+  for (int i = 0; i < rs->count; i++) {
+    if (strcmp (rs->entries[i].code, code) == 0) {
+      return &rs->entries[i];
+    }
+  }
+  if (rs->count >= MAX_REGIONS) return NULL;
+  int idx = __sync_fetch_and_add (&rs->count, 1);
+  if (idx >= MAX_REGIONS) {
+    __sync_fetch_and_add (&rs->count, -1);
+    return NULL;
+  }
+  struct region_stats_entry *e = &rs->entries[idx];
+  strncpy (e->code, code, 7);
+  e->code[7] = 0;
+  return e;
+}
+
 /* ---- GeoIP ---- */
 
 #ifdef HAVE_MAXMINDDB
@@ -105,13 +140,14 @@ static int geoip_loaded;
 
 struct geoip_result {
   char cc[4];
+  char region[8];
   char city[64];
   double latitude;
   double longitude;
 };
 
 static struct geoip_result geoip_lookup (uint32_t ip) {
-  struct geoip_result r = { .cc = "??", .city = "", .latitude = 0, .longitude = 0 };
+  struct geoip_result r = { .cc = "??", .region = "", .city = "", .latitude = 0, .longitude = 0 };
 #ifdef HAVE_MAXMINDDB
   if (!geoip_loaded) return r;
 
@@ -150,6 +186,13 @@ static struct geoip_result geoip_lookup (uint32_t ip) {
     memcpy (r.city, data.utf8_string, len);
     r.city[len] = 0;
   }
+  /* Subdivision/region code (e.g. MOW, SPE for Russia) */
+  status = MMDB_get_value (&result.entry, &data, "subdivisions", "0", "iso_code", NULL);
+  if (status == MMDB_SUCCESS && data.has_data && data.type == MMDB_DATA_TYPE_UTF8_STRING && data.data_size > 0) {
+    int len = data.data_size < 7 ? data.data_size : 7;
+    memcpy (r.region, data.utf8_string, len);
+    r.region[len] = 0;
+  }
 #else
   (void) ip;
 #endif
@@ -171,6 +214,13 @@ void ip_stats_init (void) {
                            PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (countries_shared == MAP_FAILED) {
     kprintf ("ip_stats: mmap failed for countries\n");
+    exit (1);
+  }
+
+  regions_shared = mmap (NULL, sizeof (struct region_stats_shared),
+                         PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  if (regions_shared == MAP_FAILED) {
+    kprintf ("ip_stats: mmap failed for regions\n");
     exit (1);
   }
 
@@ -212,6 +262,7 @@ void ip_stats_connect (uint32_t ip) {
       __sync_fetch_and_add (&shared->used, 1);
       struct geoip_result geo = geoip_lookup (ip);
       memcpy (s->cc, geo.cc, 4);
+      memcpy (s->region, geo.region, 8);
       memcpy (s->city, geo.city, 64);
       s->latitude = geo.latitude;
       s->longitude = geo.longitude;
@@ -250,6 +301,15 @@ void ip_stats_connect (uint32_t ip) {
       ce->longitude = s->longitude;
     }
   }
+
+  /* RU region tracking */
+  if (s->cc[0] == 'R' && s->cc[1] == 'U' && s->region[0]) {
+    struct region_stats_entry *re = region_find_or_create (s->region);
+    if (re) {
+      if (was_inactive) __sync_fetch_and_add (&re->unique_ips, 1);
+      if (is_new_ip) __sync_fetch_and_add (&re->total_ips, 1);
+    }
+  }
 }
 
 void ip_stats_disconnect (uint32_t ip) {
@@ -264,6 +324,12 @@ void ip_stats_disconnect (uint32_t ip) {
     struct country_stats_entry *ce = country_find_or_create (s->cc);
     if (ce && ce->unique_ips > 0) {
       __sync_fetch_and_add (&ce->unique_ips, -1);
+    }
+    if (s->cc[0] == 'R' && s->cc[1] == 'U' && s->region[0]) {
+      struct region_stats_entry *re = region_find_or_create (s->region);
+      if (re && re->unique_ips > 0) {
+        __sync_fetch_and_add (&re->unique_ips, -1);
+      }
     }
   }
   if (old_active <= 0) {
@@ -319,6 +385,29 @@ void ip_stats_prometheus (stats_buffer_t *sb, int top_n) {
     "# HELP teleproxy_online_ips Currently online unique IPs.\n"
     "# TYPE teleproxy_online_ips gauge\n"
     "teleproxy_online_ips %d\n", online_ips);
+
+  /* RU region metrics */
+  if (regions_shared && regions_shared->count > 0) {
+    struct region_stats_shared *rs = regions_shared;
+    sb_printf (sb,
+      "# HELP teleproxy_ru_region_unique_ips Active unique IPs by Russian region.\n"
+      "# TYPE teleproxy_ru_region_unique_ips gauge\n");
+    for (int i = 0; i < rs->count && i < MAX_REGIONS; i++) {
+      if (rs->entries[i].unique_ips > 0) {
+        sb_printf (sb, "teleproxy_ru_region_unique_ips{region=\"%s\"} %d\n",
+          rs->entries[i].code, rs->entries[i].unique_ips);
+      }
+    }
+    sb_printf (sb,
+      "# HELP teleproxy_ru_region_total_ips All-time unique IPs by Russian region.\n"
+      "# TYPE teleproxy_ru_region_total_ips counter\n");
+    for (int i = 0; i < rs->count && i < MAX_REGIONS; i++) {
+      if (rs->entries[i].total_ips > 0) {
+        sb_printf (sb, "teleproxy_ru_region_total_ips{region=\"%s\"} %lld\n",
+          rs->entries[i].code, rs->entries[i].total_ips);
+      }
+    }
+  }
 
   (void) top_n;
 }
