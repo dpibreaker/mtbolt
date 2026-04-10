@@ -84,3 +84,8 @@ For ISPs that detect MTProto by packet sizes, random padding is added.
 Client setup: prefix `dd` to secret (`cafe...babe` becomes `ddcafe...babe`).
 
 Server setup: use `-R` to allow only padded clients.
+
+When `-R` is combined with `-D domain`, the same listener accepts both:
+
+- `ee...` Fake-TLS clients for the configured domain
+- `dd...` padded MTProto clients on the raw transport

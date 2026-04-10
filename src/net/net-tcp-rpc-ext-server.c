@@ -1203,7 +1203,11 @@ int tcp_rpcs_reload_ext_secrets (const unsigned char secrets[][16],
   return 0;
 }
 
-static int allow_only_tls;
+static int tls_domains_enabled;
+
+static inline int tls_transport_is_strict_only (void) {
+  return tls_domains_enabled && !ext_rand_pad_only;
+}
 
 struct domain_info {
   const char *domain;
@@ -1813,8 +1817,8 @@ void tcp_rpc_add_proxy_domain (const char *domain) {
   info->next = *bucket;
   *bucket = info;
 
-  if (!allow_only_tls) {
-    allow_only_tls = 1;
+  if (!tls_domains_enabled) {
+    tls_domains_enabled = 1;
     default_domain_info = info;
   }
 }
@@ -2156,7 +2160,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         assert (rwm_fetch_lookup (&c->in, &packet_len, 4) == 4);
 
         c->left_tls_packet_length -= 64; // skip header length
-      } else if ((packet_len & 0xFFFFFF) == 0x010316 && (packet_len >> 24) >= 2 && ext_secret_cnt > 0 && allow_only_tls) {
+      } else if ((packet_len & 0xFFFFFF) == 0x010316 && (packet_len >> 24) >= 2 && ext_secret_cnt > 0 && tls_domains_enabled) {
         unsigned char header[5];
         assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
         min_len = 5 + 256 * header[3] + header[4];
@@ -2319,7 +2323,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         return 11; // waiting for dummy ChangeCipherSpec and first packet
       }
 
-      if (allow_only_tls && !(c->flags & C_IS_TLS)) {
+      if (tls_transport_is_strict_only () && !(c->flags & C_IS_TLS)) {
         vkprintf (1, "Expected TLS-transport\n");
         RETURN_TLS_ERROR(default_domain_info);
       }
@@ -2360,7 +2364,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           unsigned tag = pr.tag;
           int secret_id = pr.secret_id;
 
-          if (tag != OBFS2_TAG_PAD && allow_only_tls) {
+          if (tag != OBFS2_TAG_PAD && tls_transport_is_strict_only ()) {
             vkprintf (1, "Expected random padding mode\n");
             RETURN_TLS_ERROR(default_domain_info);
           }
