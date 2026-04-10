@@ -3211,6 +3211,13 @@ void mtfront_pre_init (void) {
       kprintf ("mtbolt config validation error: %s\n", mcfg_errbuf);
       exit (1);
     }
+    if (!geoip_db_path && mtbolt_cfg.geoip_enabled && mtbolt_cfg.geoip_database[0]) {
+      geoip_db_path = strdup (mtbolt_cfg.geoip_database);
+      if (!geoip_db_path) {
+        kprintf ("failed to allocate GeoIP database path\n");
+        exit (1);
+      }
+    }
   }
 
   stats_buff_size = mtbolt_cfg.stats_buffer_size;
