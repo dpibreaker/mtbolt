@@ -2720,6 +2720,31 @@ static void mtfront_prepare_link_page (stats_buffer_t *sb,
     "<p class=\"hint\">Tap a QR code to open in Telegram</p>\n");
 
   int n = toml_cfg.secret_count;
+
+#define RENDER_LINK_CARD(secret_value, mode_label) do { \
+    char url[2048]; \
+    snprintf (url, sizeof (url), \
+              "https://t.me/proxy?server=%s&port=%d&secret=%s", \
+              server, port, (secret_value)); \
+    char tg_url[2048]; \
+    snprintf (tg_url, sizeof (tg_url), \
+              "tg://proxy?server=%s&port=%d&secret=%s", \
+              server, port, (secret_value)); \
+    sb_printf (sb, "<div class=\"card\">\n"); \
+    if (toml_cfg.secrets[i].label[0] && (mode_label)[0]) { \
+      sb_printf (sb, "<div class=\"label\">%s · %s</div>\n", toml_cfg.secrets[i].label, (mode_label)); \
+    } else if (toml_cfg.secrets[i].label[0]) { \
+      sb_printf (sb, "<div class=\"label\">%s</div>\n", toml_cfg.secrets[i].label); \
+    } else if ((mode_label)[0]) { \
+      sb_printf (sb, "<div class=\"label\">%s</div>\n", (mode_label)); \
+    } \
+    sb_printf (sb, "<a href=\"%s\">", tg_url); \
+    sb_qr_svg (sb, url); \
+    sb_printf (sb, "</a>\n"); \
+    sb_printf (sb, "<a class=\"url\" href=\"%s\">%s</a>\n", tg_url, url); \
+    sb_printf (sb, "</div>\n"); \
+  } while (0)
+
   for (int i = 0; i < n; i++) {
     char secret_hex[1024];
     int pos = 0;
@@ -2737,6 +2762,18 @@ static void mtfront_prepare_link_page (stats_buffer_t *sb,
         pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
                          "%02x", (unsigned char)dom[j]);
       }
+      RENDER_LINK_CARD (secret_hex, "EE");
+
+      if (toml_cfg.random_padding_only == 1) {
+        pos = 0;
+        pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos, "dd");
+        for (int j = 0; j < 16; j++) {
+          pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
+                           "%02x", toml_cfg.secrets[i].key[j]);
+        }
+        RENDER_LINK_CARD (secret_hex, "DD");
+      }
+      continue;
     } else if (toml_cfg.random_padding_only == 1) {
       pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos, "dd");
       for (int j = 0; j < 16; j++) {
@@ -2749,27 +2786,10 @@ static void mtfront_prepare_link_page (stats_buffer_t *sb,
                          "%02x", toml_cfg.secrets[i].key[j]);
       }
     }
-
-    char url[2048];
-    snprintf (url, sizeof (url),
-              "https://t.me/proxy?server=%s&port=%d&secret=%s",
-              server, port, secret_hex);
-
-    char tg_url[2048];
-    snprintf (tg_url, sizeof (tg_url),
-              "tg://proxy?server=%s&port=%d&secret=%s",
-              server, port, secret_hex);
-
-    sb_printf (sb, "<div class=\"card\">\n");
-    if (toml_cfg.secrets[i].label[0]) {
-      sb_printf (sb, "<div class=\"label\">%s</div>\n", toml_cfg.secrets[i].label);
-    }
-    sb_printf (sb, "<a href=\"%s\">", tg_url);
-    sb_qr_svg (sb, url);
-    sb_printf (sb, "</a>\n");
-    sb_printf (sb, "<a class=\"url\" href=\"%s\">%s</a>\n", tg_url, url);
-    sb_printf (sb, "</div>\n");
+    RENDER_LINK_CARD (secret_hex, toml_cfg.random_padding_only == 1 ? "DD" : "");
   }
+
+#undef RENDER_LINK_CARD
 
   if (n == 0) {
     sb_printf (sb, "<div class=\"card\"><p>No secrets configured</p></div>\n");
@@ -3145,14 +3165,14 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("http-stats", no_argument, 0, 2000, "allow http server to answer on stats queries");
   parse_option ("mtproto-secret", required_argument, 0, 'S', "16-byte secret in hex, optionally :LABEL:LIMIT (e.g. -S abcdef01234567890abcdef012345678:myapp:1000)");
   parse_option ("proxy-tag", required_argument, 0, 'P', "16-byte proxy tag in hex mode to be passed along with all forwarded queries");
-  parse_option ("domain", required_argument, 0, 'D', "adds allowed domain or host:port for TLS-transport mode, disables other transports; can be specified more than once");
+  parse_option ("domain", required_argument, 0, 'D', "adds allowed domain or host:port for TLS-transport mode; with -R also accepts DD on the same listener; can be specified more than once");
   parse_option ("max-special-connections", required_argument, 0, 'C', "sets maximal number of accepted client connections per worker");
   parse_option ("window-clamp", required_argument, 0, 'W', "sets window clamp for client TCP connections");
   parse_option ("http-ports", required_argument, 0, 'H', "comma-separated list of client (HTTP) ports to listen");
   // parse_option ("outbound-connections-ps", required_argument, 0, 'o', "limits creation rate of outbound connections to mtproto-servers (default %d)", DEFAULT_OUTBOUND_CONNECTION_CREATION_RATE);
   parse_option ("slaves", required_argument, 0, 'M', "spawn several slave workers; not recommended for TLS-transport mode for better replay protection");
   parse_option ("ping-interval", required_argument, 0, 'T', "sets ping interval in second for local TCP connections (default %.3lf)", PING_INTERVAL);
-  parse_option ("random-padding-only", no_argument, 0, 'R', "allow only clients with random padding option enabled");
+  parse_option ("random-padding-only", no_argument, 0, 'R', "allow only clients with random padding option enabled; with -D enables DD+EE on the same listener");
   parse_option ("ip-blocklist", required_argument, 0, 2001, "path to file with CIDR ranges to reject");
   parse_option ("ip-allowlist", required_argument, 0, 2002, "path to file with CIDR ranges to exclusively allow");
   parse_option ("direct", no_argument, 0, 2003, "connect directly to Telegram DCs instead of through ME relays (incompatible with -P)");

@@ -31,6 +31,7 @@ struct ip_ht_slot {
   uint32_t ip;        /* 0 = empty, set via CAS */
   int active_conns;   /* modified via atomic add */
   long long total_conns;
+  unsigned transport_seen_mask;
   /* cached geo — populated once on first connect */
   char cc[4];
   char region[8];     /* subdivision ISO code, e.g. "MOW", "SPE" */
@@ -43,6 +44,7 @@ struct ip_ht_slot {
 struct ip_stats_shared {
   int used;  /* approximate, not exact under concurrency */
   int ht_size;
+  long long transport_total_ips[3];
   struct ip_ht_slot ht[];  /* flexible array member */
 };
 
@@ -69,6 +71,16 @@ static struct ip_stats_shared *shared;
 static struct country_stats_shared *countries_shared;
 static struct region_stats_shared *regions_shared;
 
+struct geoip_result {
+  char cc[4];
+  char region[8];
+  char city[64];
+  double latitude;
+  double longitude;
+};
+
+static struct geoip_result geoip_lookup (uint32_t ip);
+
 static inline int ip_ht_hash (uint32_t ip) {
   uint32_t h = ip;
   h ^= h >> 16;
@@ -85,6 +97,50 @@ static struct ip_ht_slot *ip_ht_find (uint32_t ip) {
     if (cur == ip) return s;
     if (cur == 0) return s;
     idx = (idx + 1) & IP_HT_MASK;
+  }
+}
+
+static struct ip_ht_slot *ip_ht_get_or_create (uint32_t ip, int *is_new_ip) {
+  struct ip_ht_slot *s = ip_ht_find (ip);
+  if (is_new_ip) {
+    *is_new_ip = 0;
+  }
+
+  if (s->ip != 0) {
+    return s;
+  }
+
+  /* Try to claim this slot atomically. */
+  uint32_t old = __sync_val_compare_and_swap (&s->ip, 0, ip);
+  if (old == 0) {
+    if (is_new_ip) {
+      *is_new_ip = 1;
+    }
+    __sync_fetch_and_add (&shared->used, 1);
+    struct geoip_result geo = geoip_lookup (ip);
+    memcpy (s->cc, geo.cc, 4);
+    memcpy (s->region, geo.region, 8);
+    memcpy (s->city, geo.city, 64);
+    s->latitude = geo.latitude;
+    s->longitude = geo.longitude;
+    return s;
+  }
+
+  if (old == ip) {
+    return s;
+  }
+
+  return ip_ht_find (ip);
+}
+
+static inline unsigned transport_mask (int transport) {
+  switch (transport) {
+    case IP_STATS_TRANSPORT_EE:
+      return 1u << 0;
+    case IP_STATS_TRANSPORT_DD:
+      return 1u << 1;
+    default:
+      return 0;
   }
 }
 
@@ -139,14 +195,6 @@ static struct region_stats_entry *region_find_or_create (const char *code) {
 static MMDB_s mmdb;
 static int geoip_loaded;
 #endif
-
-struct geoip_result {
-  char cc[4];
-  char region[8];
-  char city[64];
-  double latitude;
-  double longitude;
-};
 
 static struct geoip_result geoip_lookup (uint32_t ip) {
   struct geoip_result r = { .cc = "??", .region = "", .city = "", .latitude = 0, .longitude = 0 };
@@ -256,39 +304,9 @@ int ip_stats_geoip_load (const char *mmdb_path) {
 void ip_stats_connect (uint32_t ip) {
   if (!ip || !shared) return;
 
-  struct ip_ht_slot *s = ip_ht_find (ip);
   int is_new_ip = 0;
-
-  if (s->ip == 0) {
-    /* Try to claim this slot atomically */
-    uint32_t old = __sync_val_compare_and_swap (&s->ip, 0, ip);
-    if (old == 0) {
-      /* We claimed it — populate geo cache */
-      is_new_ip = 1;
-      __sync_fetch_and_add (&shared->used, 1);
-      struct geoip_result geo = geoip_lookup (ip);
-      memcpy (s->cc, geo.cc, 4);
-      memcpy (s->region, geo.region, 8);
-      memcpy (s->city, geo.city, 64);
-      s->latitude = geo.latitude;
-      s->longitude = geo.longitude;
-    } else if (old != ip) {
-      /* Someone else claimed it with different IP — re-find */
-      s = ip_ht_find (ip);
-      if (s->ip == 0) {
-        old = __sync_val_compare_and_swap (&s->ip, 0, ip);
-        if (old == 0) {
-          is_new_ip = 1;
-          __sync_fetch_and_add (&shared->used, 1);
-          struct geoip_result geo = geoip_lookup (ip);
-          memcpy (s->cc, geo.cc, 4);
-          memcpy (s->city, geo.city, 64);
-          s->latitude = geo.latitude;
-          s->longitude = geo.longitude;
-        }
-      }
-    }
-  }
+  struct ip_ht_slot *s = ip_ht_get_or_create (ip, &is_new_ip);
+  if (!s || s->ip == 0) return;
 
   int was_inactive = (__sync_fetch_and_add (&s->active_conns, 1) == 0);
   __sync_fetch_and_add (&s->total_conns, 1);
@@ -316,6 +334,26 @@ void ip_stats_connect (uint32_t ip) {
       if (is_new_ip) __sync_fetch_and_add (&re->total_ips, 1);
     }
   }
+}
+
+void ip_stats_transport_seen (uint32_t ip, int transport) {
+  if (!ip || !shared) return;
+
+  unsigned mask = transport_mask (transport);
+  if (!mask) return;
+
+  struct ip_ht_slot *s = ip_ht_get_or_create (ip, NULL);
+  if (!s || s->ip == 0) return;
+
+  unsigned old_mask;
+  do {
+    old_mask = s->transport_seen_mask;
+    if (old_mask & mask) {
+      return;
+    }
+  } while (!__sync_bool_compare_and_swap (&s->transport_seen_mask, old_mask, old_mask | mask));
+
+  __sync_fetch_and_add (&shared->transport_total_ips[transport], 1);
 }
 
 void ip_stats_disconnect (uint32_t ip) {
@@ -391,6 +429,14 @@ void ip_stats_prometheus (stats_buffer_t *sb, int top_n) {
     "# HELP teleproxy_online_ips Currently online unique IPs.\n"
     "# TYPE teleproxy_online_ips gauge\n"
     "teleproxy_online_ips %d\n", online_ips);
+
+  sb_printf (sb,
+    "# HELP teleproxy_transport_total_ips All-time unique IPs seen by client transport.\n"
+    "# TYPE teleproxy_transport_total_ips counter\n"
+    "teleproxy_transport_total_ips{transport=\"ee\"} %lld\n"
+    "teleproxy_transport_total_ips{transport=\"dd\"} %lld\n",
+    shared->transport_total_ips[IP_STATS_TRANSPORT_EE],
+    shared->transport_total_ips[IP_STATS_TRANSPORT_DD]);
 
   /* RU region metrics */
   if (regions_shared && regions_shared->count > 0) {

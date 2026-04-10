@@ -104,6 +104,7 @@ fs.nr_open = 10485760
 | `teleproxy_country_unique_ips` | Уникальные IP по странам (с координатами) |
 | `teleproxy_ru_region_unique_ips` | Уникальные IP по регионам России (ISO 3166-2:RU) |
 | `teleproxy_online_ips` | Уникальные IP, подключённые в данный момент |
+| `teleproxy_transport_total_ips{transport="dd\|ee"}` | Уникальные IP за всё время по transport DD/EE |
 | `teleproxy_unique_ips` | Всего уникальных IP за всё время работы |
 
 ## Безопасность

@@ -104,6 +104,7 @@ Prometheus metrics on the stats port when `--http-stats` is enabled:
 | `teleproxy_country_unique_ips` | Unique IPs per country (with lat/lon) |
 | `teleproxy_ru_region_unique_ips` | Unique IPs per Russian region (ISO 3166-2:RU) |
 | `teleproxy_online_ips` | Currently connected unique IPs |
+| `teleproxy_transport_total_ips{transport="dd\|ee"}` | All-time unique IPs by DD/EE transport |
 | `teleproxy_unique_ips` | Total unique IPs seen |
 
 ## Security
