@@ -58,6 +58,7 @@ def test_prometheus_metrics():
                 "teleproxy_workers",
                 "teleproxy_forwarded_queries_total",
                 "teleproxy_active_connections",
+                "teleproxy_transport_total_ips",
             ]
             for metric in required_metrics:
                 assert metric in body, f"Missing metric: {metric}"

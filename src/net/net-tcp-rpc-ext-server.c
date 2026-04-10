@@ -54,6 +54,7 @@
 #include "net/net-tls-parse.h"
 #include "net/net-thread.h"
 #include "mtproto/mtproto-dc-table.h"
+#include "mtproto/ip-stats.h"
 
 #include "vv/vv-io.h"
 #include "mtproto/mtbolt-config.h"
@@ -2443,6 +2444,20 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             per_secret_connections[_sid - 1]++;
             per_secret_connections_created[_sid - 1]++;
             ip_track_connect (_sid - 1, c->remote_ip, c->remote_ipv6);
+          }
+        }
+
+        {
+          int transport = IP_STATS_TRANSPORT_UNKNOWN;
+          if (c->flags & C_IS_TLS) {
+            transport = IP_STATS_TRANSPORT_EE;
+          } else if ((unsigned) D->extra_int3 == OBFS2_TAG_PAD) {
+            transport = IP_STATS_TRANSPORT_DD;
+          } else if ((unsigned) D->extra_int3 == OBFS2_TAG_MEDIUM) {
+            transport = IP_STATS_TRANSPORT_EE;
+          }
+          if (transport != IP_STATS_TRANSPORT_UNKNOWN) {
+            ip_stats_transport_seen (c->remote_ip, transport);
           }
         }
 
