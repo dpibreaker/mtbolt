@@ -11,7 +11,7 @@ import time
 from test_tls_e2e import build_client_hello, _verify_server_hmac, wait_for_proxy
 
 
-def _do_handshake_with_tail(host, port, secret_bytes, domain=None):
+def _do_handshake_with_tail(host, port, secret_bytes, tail, domain=None):
     """Send ClientHello plus post-handshake tail in a single TCP write."""
     if domain is None:
         domain = os.environ.get(
@@ -28,11 +28,6 @@ def _do_handshake_with_tail(host, port, secret_bytes, domain=None):
     xored_ts = bytes(a ^ b for a, b in zip(ts_bytes, expected[28:32]))
     client_random = expected[:28] + xored_ts
     hello[11:43] = client_random
-
-    # Dummy CCS + one fake application-data record.  The payload itself is
-    # intentionally junk; this test only verifies that the proxy authenticates
-    # and responds to the ClientHello instead of rejecting coalesced tail bytes.
-    tail = b"\x14\x03\x03\x00\x01\x01\x17\x03\x03\x00\x40" + (b"\x00" * 64)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(10)
@@ -55,9 +50,18 @@ def _do_handshake_with_tail(host, port, secret_bytes, domain=None):
                 break
         except socket.timeout:
             break
-    sock.close()
+    return sock, data, bytes(client_random)
 
-    return data, bytes(client_random)
+
+def _assert_socket_not_closed(sock):
+    sock.setblocking(False)
+    try:
+        data = sock.recv(1)
+        assert data != b"", "Proxy closed the socket immediately"
+    except BlockingIOError:
+        pass
+    finally:
+        sock.close()
 
 
 def test_tls_handshake_accepts_coalesced_tail():
@@ -67,14 +71,39 @@ def test_tls_handshake_accepts_coalesced_tail():
     assert secret_hex, "TELEPROXY_SECRET environment variable not set"
 
     secret_bytes = bytes.fromhex(secret_hex)
-    data, client_random = _do_handshake_with_tail(host, port, secret_bytes)
+    tail = b"\x14\x03\x03\x00\x01\x01\x17\x03\x03\x00\x40" + (b"\x00" * 64)
+    sock, data, client_random = _do_handshake_with_tail(host, port, secret_bytes, tail)
 
     assert len(data) >= 138, f"Response too short after coalesced tail: {len(data)} bytes"
     assert _verify_server_hmac(data, client_random, secret_bytes), (
         "Proxy rejected a valid ClientHello when post-handshake TLS bytes "
         "were coalesced into the same TCP segment"
     )
+    time.sleep(0.2)
+    _assert_socket_not_closed(sock)
     print("  Coalesced ClientHello tail accepted")
+
+
+def test_tls_handshake_accepts_coalesced_tail_without_ccs():
+    host = os.environ.get("TELEPROXY_HOST", "teleproxy")
+    port = int(os.environ.get("TELEPROXY_PORT", "8443"))
+    secret_hex = os.environ.get("TELEPROXY_SECRET", "")
+    assert secret_hex, "TELEPROXY_SECRET environment variable not set"
+
+    secret_bytes = bytes.fromhex(secret_hex)
+    # telemt tolerates clients that send ApplicationData immediately after the
+    # fake-TLS handshake without a dummy CCS record. mtbolt should do the same.
+    tail = b"\x17\x03\x03\x00\x40" + os.urandom(64)
+    sock, data, client_random = _do_handshake_with_tail(host, port, secret_bytes, tail)
+
+    assert len(data) >= 138, f"Response too short after no-CCS tail: {len(data)} bytes"
+    assert _verify_server_hmac(data, client_random, secret_bytes), (
+        "Proxy rejected a valid ClientHello when ApplicationData was "
+        "coalesced without a dummy CCS record"
+    )
+    time.sleep(0.2)
+    _assert_socket_not_closed(sock)
+    print("  Coalesced no-CCS ClientHello tail accepted")
 
 
 def main():
@@ -92,6 +121,9 @@ def main():
         print("[RUN]  test_tls_handshake_accepts_coalesced_tail")
         test_tls_handshake_accepts_coalesced_tail()
         print("[PASS] test_tls_handshake_accepts_coalesced_tail")
+        print("[RUN]  test_tls_handshake_accepts_coalesced_tail_without_ccs")
+        test_tls_handshake_accepts_coalesced_tail_without_ccs()
+        print("[PASS] test_tls_handshake_accepts_coalesced_tail_without_ccs")
         sys.exit(0)
     except Exception as e:
         print(f"[FAIL] test_tls_handshake_accepts_coalesced_tail: {e}")

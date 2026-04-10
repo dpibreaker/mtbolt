@@ -2127,28 +2127,57 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
       // fake tls
       if (c->flags & C_IS_TLS) {
-        if (len < 11) {
-          return 11 - len;
+        if (len < 5) {
+          return 5 - len;
         }
 
         vkprintf (1, "Established TLS connection from %s:%d\n", show_remote_ip (C), c->remote_port);
         unsigned char header[11];
-        assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
-        if (memcmp (header, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9) != 0) {
-          vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
-          fail_connection (C, -1);
-          return 0;
+        int tls_prefix_len;
+        assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
+
+        if (memcmp (header, "\x17\x03\x03", 3) == 0) {
+          /* Match telemt's behavior: client CCS is optional, so accept
+             ApplicationData immediately after ServerHello as well. */
+          tls_prefix_len = 5;
+          c->left_tls_packet_length = 256 * header[3] + header[4];
+          min_len = 5 + c->left_tls_packet_length;
+          if (len < min_len) {
+            vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
+            return min_len - len;
+          }
+          vkprintf (1, "Client skipped dummy ChangeCipherSpec, accepting TLS application data directly\n");
+        } else {
+          if (len < 6) {
+            return 6 - len;
+          }
+          assert (rwm_fetch_lookup (&c->in, header, 6) == 6);
+          if (memcmp (header, "\x14\x03\x03\x00\x01\x01", 6) != 0) {
+            vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
+            fail_connection (C, -1);
+            return 0;
+          }
+          if (len < 11) {
+            return 11 - len;
+          }
+          assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
+          if (memcmp (header + 6, "\x17\x03\x03", 3) != 0) {
+            vkprintf (1, "error while parsing packet: expected TLS application data after ChangeCipherSpec\n");
+            fail_connection (C, -1);
+            return 0;
+          }
+
+          tls_prefix_len = 11;
+          c->left_tls_packet_length = 256 * header[9] + header[10];
+          min_len = 11 + c->left_tls_packet_length;
+          if (len < min_len) {
+            vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
+            return min_len - len;
+          }
         }
 
-        min_len = 11 + 256 * header[9] + header[10];
-        if (len < min_len) {
-          vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
-          return min_len - len;
-        }
-
-        assert (rwm_skip_data (&c->in, 11) == 11);
-        len -= 11;
-        c->left_tls_packet_length = 256 * header[9] + header[10]; // store left length of current TLS packet in extra_int3
+        assert (rwm_skip_data (&c->in, tls_prefix_len) == tls_prefix_len);
+        len -= tls_prefix_len;
         vkprintf (2, "Receive first TLS packet of length %d\n", c->left_tls_packet_length);
 
         if (c->left_tls_packet_length < 64) {
