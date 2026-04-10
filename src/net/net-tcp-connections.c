@@ -278,6 +278,22 @@ int cpu_tcp_aes_crypto_ctr128_decrypt_input (connection_job_t C) /* {{{ */ {
 
         unsigned char header[5];
         assert (rwm_fetch_lookup (&c->in_u, header, 5) == 5);
+        if (memcmp (header, "\x14\x03\x03\x00\x01", 5) == 0) {
+          if (len < 6) {
+            vkprintf (2, "Need %d more bytes to parse TLS ChangeCipherSpec\n", 6 - len);
+            return 6 - len;
+          }
+          unsigned char ccs[6];
+          assert (rwm_fetch_lookup (&c->in_u, ccs, 6) == 6);
+          if (ccs[5] != 0x01) {
+            vkprintf (1, "error while parsing packet: bad TLS ChangeCipherSpec record\n");
+            fail_connection (C, -1);
+            return 0;
+          }
+          assert (rwm_skip_data (&c->in_u, 6) == 6);
+          vkprintf (2, "Ignoring TLS dummy ChangeCipherSpec inside encrypted stream\n");
+          continue;
+        }
         if (memcmp (header, "\x17\x03\x03", 3) != 0) {
           vkprintf (1, "error while parsing packet: expect TLS header\n");
           fail_connection (C, -1);

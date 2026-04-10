@@ -20,9 +20,34 @@
 #pragma once
 
 #define MAX_ENCRYPTED_RECORDS 8
+#define TLS_CLIENT_HELLO_MIN_LEN 100
+#define TLS_CLIENT_HELLO_MAX_LEN 16384
+
+struct tls_client_hello_layout {
+  int record_length;
+  int handshake_length;
+  int client_random_offset;
+  int session_id_offset;
+  int session_id_length;
+  int cipher_suites_offset;
+  int cipher_suites_length;
+  int compression_methods_offset;
+  int compression_methods_length;
+  int extensions_offset;
+  int extensions_length;
+};
 
 /* Read a 2-byte big-endian length from data at *pos, advancing *pos by 2. */
 int tls_read_length (const unsigned char *data, int *pos);
+
+/* Check whether a TLS record header can be a ClientHello record accepted by
+   fake-TLS compatibility mode. */
+int tls_is_client_hello_record_header (const unsigned char *header);
+
+/* Parse the outer TLS ClientHello framing and variable-length sections.
+   Returns 0 on success, -1 on failure. */
+int tls_parse_client_hello_layout (const unsigned char *client_hello, int len,
+                                   struct tls_client_hello_layout *layout);
 
 /* Validate an upstream TLS ServerHello response.
    Returns 1 on success, 0 on failure.

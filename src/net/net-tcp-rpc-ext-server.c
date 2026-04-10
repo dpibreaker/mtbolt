@@ -1210,6 +1210,90 @@ static inline int tls_transport_is_strict_only (void) {
   return tls_domains_enabled && !ext_rand_pad_only;
 }
 
+/* Collect the first 64-byte MTProto obfs2 header from a post-handshake fake-TLS
+   stream.  Real clients may fragment it across multiple ApplicationData records
+   and interleave dummy CCS records between fragments.  On success:
+     - header receives the 64 bytes
+     - skip_bytes is the number of framed bytes to consume from raw
+     - remaining_tls_payload is the bytes still left in the current AppData record */
+static int tls_extract_initial_obfs2_header (struct raw_message *raw,
+                                             unsigned char header[64],
+                                             int *skip_bytes,
+                                             int *remaining_tls_payload) {
+  struct raw_message tmp;
+  rwm_clone (&tmp, raw);
+
+  int copied = 0;
+  int consumed = 0;
+
+  while (copied < 64) {
+    if (tmp.total_bytes < 5) {
+      int need_more = 5 - tmp.total_bytes;
+      rwm_free (&tmp);
+      return need_more;
+    }
+
+    unsigned char tls_header[5];
+    assert (rwm_fetch_lookup (&tmp, tls_header, 5) == 5);
+
+    if (tls_header[1] != 0x03 || tls_header[2] != 0x03) {
+      rwm_free (&tmp);
+      return -1;
+    }
+
+    int record_len = 256 * tls_header[3] + tls_header[4];
+    int framed_len = 5 + record_len;
+    if (tmp.total_bytes < framed_len) {
+      int need_more = framed_len - tmp.total_bytes;
+      rwm_free (&tmp);
+      return need_more;
+    }
+
+    if (tls_header[0] == 0x14) {
+      unsigned char ccs[6];
+      if (record_len != 1) {
+        rwm_free (&tmp);
+        return -1;
+      }
+      assert (rwm_fetch_lookup (&tmp, ccs, 6) == 6);
+      if (ccs[5] != 0x01) {
+        rwm_free (&tmp);
+        return -1;
+      }
+      assert (rwm_skip_data (&tmp, 6) == 6);
+      consumed += 6;
+      continue;
+    }
+
+    if (tls_header[0] != 0x17 || record_len <= 0) {
+      rwm_free (&tmp);
+      return -1;
+    }
+
+    assert (rwm_skip_data (&tmp, 5) == 5);
+    consumed += 5;
+
+    int take = 64 - copied;
+    if (take > record_len) {
+      take = record_len;
+    }
+    assert (rwm_fetch_lookup (&tmp, header + copied, take) == take);
+    assert (rwm_skip_data (&tmp, take) == take);
+    copied += take;
+    consumed += take;
+
+    if (copied == 64) {
+      *skip_bytes = consumed;
+      *remaining_tls_payload = record_len - take;
+      rwm_free (&tmp);
+      return 0;
+    }
+  }
+
+  rwm_free (&tmp);
+  return -1;
+}
+
 struct domain_info {
   const char *domain;
   int port;
@@ -2093,6 +2177,13 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
     assert (rwm_fetch_lookup (&c->in, &packet_len, 4) == 4);
 
     if (D->in_packet_num == -3) {
+      int have_prefetched_random_header = 0;
+      int tls_header_skip_bytes = 0;
+      unsigned char random_header[64];
+      unsigned char random_header_ct[64];
+      unsigned char tls_prefix[5];
+      assert (rwm_fetch_lookup (&c->in, tls_prefix, 5) == 5);
+
       vkprintf (1, "trying to determine type of connection from %s:%d\n", show_remote_ip (C), c->remote_port);
 #if __ALLOW_UNOBFS__
       if ((packet_len & 0xff) == 0xef) {
@@ -2127,73 +2218,27 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
 
       // fake tls
       if (c->flags & C_IS_TLS) {
-        if (len < 5) {
-          return 5 - len;
-        }
-
         vkprintf (1, "Established TLS connection from %s:%d\n", show_remote_ip (C), c->remote_port);
-        unsigned char header[11];
-        int tls_prefix_len;
-        assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
-
-        if (memcmp (header, "\x17\x03\x03", 3) == 0) {
-          /* Match telemt's behavior: client CCS is optional, so accept
-             ApplicationData immediately after ServerHello as well. */
-          tls_prefix_len = 5;
-          c->left_tls_packet_length = 256 * header[3] + header[4];
-          min_len = 5 + c->left_tls_packet_length;
-          if (len < min_len) {
-            vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
-            return min_len - len;
-          }
-          vkprintf (1, "Client skipped dummy ChangeCipherSpec, accepting TLS application data directly\n");
-        } else {
-          if (len < 6) {
-            return 6 - len;
-          }
-          assert (rwm_fetch_lookup (&c->in, header, 6) == 6);
-          if (memcmp (header, "\x14\x03\x03\x00\x01\x01", 6) != 0) {
-            vkprintf (1, "error while parsing packet: bad client dummy ChangeCipherSpec\n");
-            fail_connection (C, -1);
-            return 0;
-          }
-          if (len < 11) {
-            return 11 - len;
-          }
-          assert (rwm_fetch_lookup (&c->in, header, 11) == 11);
-          if (memcmp (header + 6, "\x17\x03\x03", 3) != 0) {
-            vkprintf (1, "error while parsing packet: expected TLS application data after ChangeCipherSpec\n");
-            fail_connection (C, -1);
-            return 0;
-          }
-
-          tls_prefix_len = 11;
-          c->left_tls_packet_length = 256 * header[9] + header[10];
-          min_len = 11 + c->left_tls_packet_length;
-          if (len < min_len) {
-            vkprintf (2, "Need %d bytes, but have only %d\n", min_len, len);
-            return min_len - len;
-          }
+        int tls_extract_result = tls_extract_initial_obfs2_header (&c->in, random_header,
+                                                                   &tls_header_skip_bytes,
+                                                                   &c->left_tls_packet_length);
+        if (tls_extract_result > 0) {
+          vkprintf (2, "Need %d more bytes to collect first MTProto header over fake-TLS\n",
+                    tls_extract_result);
+          return tls_extract_result;
         }
-
-        assert (rwm_skip_data (&c->in, tls_prefix_len) == tls_prefix_len);
-        len -= tls_prefix_len;
-        vkprintf (2, "Receive first TLS packet of length %d\n", c->left_tls_packet_length);
-
-        if (c->left_tls_packet_length < 64) {
-          vkprintf (1, "error while parsing packet: too short first TLS packet: %d\n", c->left_tls_packet_length);
+        if (tls_extract_result < 0) {
+          vkprintf (1, "error while parsing packet: invalid fake-TLS record sequence before MTProto header\n");
           fail_connection (C, -1);
           return 0;
         }
-        // now len >= c->left_tls_packet_length >= 64
-
-        assert (rwm_fetch_lookup (&c->in, &packet_len, 4) == 4);
-
-        c->left_tls_packet_length -= 64; // skip header length
-      } else if ((packet_len & 0xFFFFFF) == 0x010316 && (packet_len >> 24) >= 2 && ext_secret_cnt > 0 && tls_domains_enabled) {
-        unsigned char header[5];
-        assert (rwm_fetch_lookup (&c->in, header, 5) == 5);
-        min_len = 5 + 256 * header[3] + header[4];
+        memcpy (random_header_ct, random_header, 64);
+        have_prefetched_random_header = 1;
+        vkprintf (2, "Collected first MTProto header across %d framed fake-TLS bytes, %d bytes remain in current TLS packet\n",
+                  tls_header_skip_bytes, c->left_tls_packet_length);
+      } else if (ext_secret_cnt > 0 && tls_domains_enabled &&
+                 tls_is_client_hello_record_header (tls_prefix)) {
+        min_len = 5 + 256 * tls_prefix[3] + tls_prefix[4];
         if (len < min_len) {
           return min_len - len;
         }
@@ -2202,11 +2247,15 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
            segment.  Parse and authenticate exactly the first ClientHello record
            and leave any tail bytes queued for the established TLS path. */
         int client_hello_len = min_len;
-        int read_len = client_hello_len <= 4096 ? client_hello_len : 4096;
-        unsigned char client_hello[read_len + 1]; // VLA
-        assert (rwm_fetch_lookup (&c->in, client_hello, read_len) == read_len);
+        unsigned char client_hello[client_hello_len]; // VLA
+        assert (rwm_fetch_lookup (&c->in, client_hello, client_hello_len) == client_hello_len);
 
-        const struct domain_info *info = get_sni_domain_info (client_hello, read_len);
+        struct tls_client_hello_layout hello_layout;
+        if (tls_parse_client_hello_layout (client_hello, client_hello_len, &hello_layout) < 0) {
+          RETURN_TLS_ERROR(default_domain_info);
+        }
+
+        const struct domain_info *info = get_sni_domain_info (client_hello, client_hello_len);
         if (info == NULL) {
           RETURN_TLS_ERROR(default_domain_info);
         }
@@ -2218,14 +2267,9 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           RETURN_TLS_ERROR(info);
         }
 
-        if (client_hello_len != read_len) {
-          vkprintf (1, "Too big ClientHello: receive %d bytes\n", client_hello_len);
-          RETURN_TLS_ERROR(info);
-        }
-
         unsigned char client_random[32];
-        memcpy (client_random, client_hello + 11, 32);
-        memset (client_hello + 11, '\0', 32);
+        memcpy (client_random, client_hello + hello_layout.client_random_offset, 32);
+        memset (client_hello + hello_layout.client_random_offset, '\0', 32);
 
         if (have_client_random (client_random)) {
           vkprintf (1, "Receive again request with the same client random\n");
@@ -2279,7 +2323,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         }
 
         unsigned char cipher_suite_id;
-        if (tls_parse_client_hello_ciphers (client_hello, read_len, &cipher_suite_id) < 0) {
+        if (tls_parse_client_hello_ciphers (client_hello, client_hello_len, &cipher_suite_id) < 0) {
           vkprintf (1, "Can't find supported cipher suite\n");
           RETURN_TLS_ERROR(info);
         }
@@ -2289,19 +2333,38 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         c->left_tls_packet_length = -1;
 
         int encrypted_size = get_domain_server_hello_encrypted_size (info);
-        int response_size = 127 + 6 + 5 + encrypted_size;
+        int session_id_length = hello_layout.session_id_length;
+        int server_hello_size = 95 + session_id_length;
+        int response_size = server_hello_size + 6 + 5 + encrypted_size;
         unsigned char *buffer = malloc (32 + response_size);
         assert (buffer != NULL);
         memcpy (buffer, client_random, 32);
         unsigned char *response_buffer = buffer + 32;
-        memcpy (response_buffer, "\x16\x03\x03\x00\x7a\x02\x00\x00\x76\x03\x03", 11);
-        memset (response_buffer + 11, '\0', 32);
-        response_buffer[43] = '\x20';
-        memcpy (response_buffer + 44, client_hello + 44, 32);
-        memcpy (response_buffer + 76, "\x13\x01\x00\x00\x2e", 5);
-        response_buffer[77] = cipher_suite_id;
+        int server_hello_record_length = server_hello_size - 5;
+        int server_hello_body_length = server_hello_record_length - 4;
+        int pos = 0;
+        response_buffer[pos++] = 0x16;
+        response_buffer[pos++] = 0x03;
+        response_buffer[pos++] = 0x03;
+        response_buffer[pos++] = server_hello_record_length >> 8;
+        response_buffer[pos++] = server_hello_record_length & 255;
+        response_buffer[pos++] = 0x02;
+        response_buffer[pos++] = (server_hello_body_length >> 16) & 255;
+        response_buffer[pos++] = (server_hello_body_length >> 8) & 255;
+        response_buffer[pos++] = server_hello_body_length & 255;
+        response_buffer[pos++] = 0x03;
+        response_buffer[pos++] = 0x03;
+        memset (response_buffer + pos, '\0', 32);
+        pos += 32;
+        response_buffer[pos++] = session_id_length;
+        memcpy (response_buffer + pos, client_hello + hello_layout.session_id_offset, session_id_length);
+        pos += session_id_length;
+        response_buffer[pos++] = 0x13;
+        response_buffer[pos++] = cipher_suite_id;
+        response_buffer[pos++] = 0x00;
+        response_buffer[pos++] = 0x00;
+        response_buffer[pos++] = 0x2e;
 
-        int pos = 81;
         int tls_server_extensions[3] = {0x33, 0x2b, -1};
         if (info->is_reversed_extension_order) {
           int t = tls_server_extensions[0];
@@ -2311,20 +2374,20 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         int i;
         for (i = 0; tls_server_extensions[i] != -1; i++) {
           if (tls_server_extensions[i] == 0x33) {
-            assert (pos + 40 <= response_size);
+            assert (pos + 40 <= server_hello_size);
             memcpy (response_buffer + pos, "\x00\x33\x00\x24\x00\x1d\x00\x20", 8);
             generate_public_key (response_buffer + pos + 8);
             pos += 40;
           } else if (tls_server_extensions[i] == 0x2b) {
-            assert (pos + 5 <= response_size);
+            assert (pos + 6 <= server_hello_size);
             memcpy (response_buffer + pos, "\x00\x2b\x00\x02\x03\x04", 6);
             pos += 6;
           } else {
             assert (0);
           }
         }
-        assert (pos == 127);
-        memcpy (response_buffer + 127, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9);
+        assert (pos == server_hello_size);
+        memcpy (response_buffer + server_hello_size, "\x14\x03\x03\x00\x01\x01\x17\x03\x03", 9);
         pos += 9;
         response_buffer[pos++] = encrypted_size / 256;
         response_buffer[pos++] = encrypted_size % 256;
@@ -2340,12 +2403,12 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
            is queued, producing separate TCP segments.  This defeats DPI
            that pattern-matches the full handshake in a single packet. */
         struct raw_message *m1 = calloc (sizeof (struct raw_message), 1);
-        rwm_create (m1, response_buffer, 127);              /* ServerHello record */
+        rwm_create (m1, response_buffer, server_hello_size); /* ServerHello record */
         mpq_push_w (c->out_queue, m1, 0);
         job_signal (JOB_REF_CREATE_PASS (C), JS_RUN);
 
         struct raw_message *m2 = calloc (sizeof (struct raw_message), 1);
-        rwm_create (m2, response_buffer + 127, response_size - 127); /* CCS + AppData */
+        rwm_create (m2, response_buffer + server_hello_size, response_size - server_hello_size); /* CCS + AppData */
         mpq_push_w (c->out_queue, m2, 0);
         job_signal (JOB_REF_CREATE_PASS (C), JS_RUN);
 
@@ -2368,7 +2431,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
       }
 #endif
 
-      if (len < 64) {
+      if (!have_prefetched_random_header && len < 64) {
         assert (!(c->flags & C_IS_TLS));
 #if __ALLOW_UNOBFS__
         vkprintf (1, "random 64-byte header: first 0x%08x 0x%08x, need %d more bytes to distinguish\n", tmp[0], tmp[1], 64 - len);
@@ -2378,12 +2441,12 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         return 64 - len;
       }
 
-      unsigned char random_header[64];
-      assert (rwm_fetch_lookup (&c->in, random_header, 64) == 64);
+      if (!have_prefetched_random_header) {
+        assert (rwm_fetch_lookup (&c->in, random_header, 64) == 64);
 
-      /* Save ciphertext — needed to re-init crypto with counter at byte 64 */
-      unsigned char random_header_ct[64];
-      memcpy (random_header_ct, random_header, 64);
+        /* Save ciphertext — needed to re-init crypto with counter at byte 64 */
+        memcpy (random_header_ct, random_header, 64);
+      }
 
       struct obfs2_parse_result pr;
       int ok = (obfs2_parse_header (random_header,
@@ -2405,7 +2468,11 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           struct aes_crypto *T = c->crypto;
           evp_crypt (T->read_aeskey, random_header_ct, random_header_ct, 64);
 
-          assert (rwm_skip_data (&c->in, 64) == 64);
+          if (have_prefetched_random_header) {
+            assert (rwm_skip_data (&c->in, tls_header_skip_bytes) == tls_header_skip_bytes);
+          } else {
+            assert (rwm_skip_data (&c->in, 64) == 64);
+          }
           rwm_union (&c->in_u, &c->in);
           rwm_init (&c->in, 0);
           D->in_packet_num = 0;

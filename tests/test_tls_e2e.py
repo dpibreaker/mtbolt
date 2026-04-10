@@ -35,15 +35,21 @@ def _generate_greases():
     return greases
 
 
-def build_client_hello(domain):
+def build_client_hello(domain, record_version=b"\x03\x01", session_id_length=32):
     """Build a 517-byte TLS ClientHello matching Teleproxy's create_request().
 
     Args:
         domain: SNI hostname to include in the ClientHello.
+        record_version: TLS record layer version bytes, typically b"\\x03\\x01"
+            or b"\\x03\\x03".
+        session_id_length: Length of echoed session_id bytes.
 
     Returns:
         bytearray of exactly 517 bytes.
     """
+    assert len(record_version) == 2, "record_version must be 2 bytes"
+    assert 0 <= session_id_length <= 32, "session_id_length must be in [0, 32]"
+
     buf = bytearray(TLS_REQUEST_LENGTH)
     pos = 0
     greases = _generate_greases()
@@ -74,14 +80,16 @@ def build_client_hello(domain):
     # TLS record header (type=handshake, version=TLS1.0, length=512)
     # + handshake header (type=ClientHello, body_length=508)
     # + ClientHello version (TLS 1.2)
-    add(b"\x16\x03\x01\x02\x00\x01\x00\x01\xfc\x03\x03")
+    add(b"\x16")
+    add(record_version)
+    add(b"\x02\x00\x01\x00\x01\xfc\x03\x03")
 
     # client_random (32 bytes)
     add_random(32)
 
-    # session_id_length (32) + session_id
-    add(b"\x20")
-    add_random(32)
+    # session_id_length + session_id
+    add(bytes([session_id_length]))
+    add_random(session_id_length)
 
     # cipher_suites_length (34) + GREASE + 16 cipher suites
     add(b"\x00\x22")
@@ -296,7 +304,15 @@ def parse_tls_server_hello(data):
 # ============================================================
 
 
-def _do_handshake(host, port, secret_bytes, domain=None, timestamp_offset=0):
+def _do_handshake(
+    host,
+    port,
+    secret_bytes,
+    domain=None,
+    timestamp_offset=0,
+    record_version=b"\x03\x01",
+    session_id_length=32,
+):
     """Build and send a fake-TLS ClientHello, return raw response + client_random.
 
     The SNI domain MUST match the proxy's -D/EE_DOMAIN setting for the proxy
@@ -324,7 +340,11 @@ def _do_handshake(host, port, secret_bytes, domain=None, timestamp_offset=0):
         domain = os.environ.get(
             "EE_DOMAIN", os.environ.get("TLS_BACKEND_HOST", "172.30.0.10")
         )
-    hello = build_client_hello(domain)
+    hello = build_client_hello(
+        domain,
+        record_version=record_version,
+        session_id_length=session_id_length,
+    )
 
     hello_zeroed = bytearray(hello)
     hello_zeroed[11:43] = b"\x00" * 32
@@ -354,11 +374,13 @@ def _do_handshake(host, port, secret_bytes, domain=None, timestamp_offset=0):
             if not chunk:
                 break
             data += chunk
-            # Once we have the app-data header, compute expected total
-            if expected_total == 0 and len(data) >= 138:
-                # ServerHello(127) + CCS(6) + app-data header(5) = 138
-                enc_len = struct.unpack(">H", data[136:138])[0]
-                expected_total = 138 + enc_len
+            if expected_total == 0 and len(data) >= 5:
+                server_hello_size = 5 + struct.unpack(">H", data[3:5])[0]
+                if len(data) >= server_hello_size + 11:
+                    enc_len = struct.unpack(
+                        ">H", data[server_hello_size + 9 : server_hello_size + 11]
+                    )[0]
+                    expected_total = server_hello_size + 11 + enc_len
             if expected_total > 0 and len(data) >= expected_total:
                 break
         except socket.timeout:
