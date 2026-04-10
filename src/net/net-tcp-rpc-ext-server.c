@@ -2169,7 +2169,11 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           return min_len - len;
         }
 
-        int read_len = len <= 4096 ? len : 4096;
+        /* Some clients coalesce post-ClientHello TLS records into the same TCP
+           segment.  Parse and authenticate exactly the first ClientHello record
+           and leave any tail bytes queued for the established TLS path. */
+        int client_hello_len = min_len;
+        int read_len = client_hello_len <= 4096 ? client_hello_len : 4096;
         unsigned char client_hello[read_len + 1]; // VLA
         assert (rwm_fetch_lookup (&c->in, client_hello, read_len) == read_len);
 
@@ -2185,12 +2189,8 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           RETURN_TLS_ERROR(info);
         }
 
-        if (len > min_len) {
-          vkprintf (1, "Too much data in ClientHello, receive %d instead of %d\n", len, min_len);
-          RETURN_TLS_ERROR(info);
-        }
-        if (len != read_len) {
-          vkprintf (1, "Too big ClientHello: receive %d bytes\n", len);
+        if (client_hello_len != read_len) {
+          vkprintf (1, "Too big ClientHello: receive %d bytes\n", client_hello_len);
           RETURN_TLS_ERROR(info);
         }
 
@@ -2208,7 +2208,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         unsigned char expected_random[32];
         int secret_id;
         for (secret_id = 0; secret_id < ext_secret_cnt; secret_id++) {
-          sha256_hmac (ext_secret[secret_id], 16, client_hello, len, expected_random);
+          sha256_hmac (ext_secret[secret_id], 16, client_hello, client_hello_len, expected_random);
           if (CRYPTO_memcmp (expected_random, client_random, 28) == 0) {
             break;
           }
@@ -2255,7 +2255,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           RETURN_TLS_ERROR(info);
         }
 
-        assert (rwm_skip_data (&c->in, len) == len);
+        assert (rwm_skip_data (&c->in, client_hello_len) == client_hello_len);
         c->flags |= C_IS_TLS;
         c->left_tls_packet_length = -1;
 
