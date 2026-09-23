@@ -43,6 +43,19 @@ else
   COMMON_LDFLAGS := -ggdb -rdynamic -lm -lrt -lcrypto -lz -lpthread -latomic
 endif
 
+# MTBolt country/region metrics use MaxMindDB when available.  The build
+# remains usable without the optional GeoIP and allocator development libs.
+MAXMINDDB_LIBS := $(shell pkg-config --libs libmaxminddb 2>/dev/null)
+ifneq ($(MAXMINDDB_LIBS),)
+COMMON_CFLAGS += -DHAVE_MAXMINDDB $(shell pkg-config --cflags libmaxminddb 2>/dev/null)
+COMMON_LDFLAGS += $(MAXMINDDB_LIBS)
+endif
+JEMALLOC_LIBS := $(shell pkg-config --libs jemalloc 2>/dev/null)
+ifneq ($(JEMALLOC_LIBS),)
+COMMON_CFLAGS += -DHAVE_JEMALLOC $(shell pkg-config --cflags jemalloc 2>/dev/null)
+COMMON_LDFLAGS += $(JEMALLOC_LIBS)
+endif
+
 # Auto-detect libunwind for stack traces on musl/Alpine (test/CI builds)
 LIBUNWIND_CFLAGS := $(shell pkg-config --cflags libunwind 2>/dev/null)
 LIBUNWIND_LDFLAGS := $(shell pkg-config --libs libunwind 2>/dev/null)
@@ -85,7 +98,7 @@ EXELIST	:= ${EXE}/teleproxy
 
 
 OBJECTS	=	\
-  ${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-proxy-stats.o ${OBJ}/src/mtproto/mtproto-proxy-http.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/mtproto-dc-probes.o ${OBJ}/src/mtproto/mtproto-check.o ${OBJ}/src/mtproto/mtproto-link.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o ${OBJ}/src/net/net-tcp-rpc-ext-drain.o ${OBJ}/src/net/net-tcp-rpc-ext-top-ips.o ${OBJ}/src/net/net-tcp-rpc-ext-uniq-bloom.o ${OBJ}/src/net/net-tcp-rpc-ext-domain.o ${OBJ}/src/net/net-ja4.o ${OBJ}/src/net/net-tcp-direct-dc.o
+  ${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-proxy-stats.o ${OBJ}/src/mtproto/mtproto-proxy-http.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtbolt-config.o ${OBJ}/src/mtproto/ip-stats.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/mtproto-dc-probes.o ${OBJ}/src/mtproto/mtproto-check.o ${OBJ}/src/mtproto/mtproto-link.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o ${OBJ}/src/net/net-tcp-rpc-ext-drain.o ${OBJ}/src/net/net-tcp-rpc-ext-top-ips.o ${OBJ}/src/net/net-tcp-rpc-ext-uniq-bloom.o ${OBJ}/src/net/net-tcp-rpc-ext-domain.o ${OBJ}/src/net/net-ja4.o ${OBJ}/src/net/net-tcp-direct-dc.o
 
 DEPENDENCE_CXX		:=	$(subst ${OBJ}/,${DEP}/,$(patsubst %.o,%.d,${OBJECTS_CXX}))
 DEPENDENCE_STRANGE	:=	$(subst ${OBJ}/,${DEP}/,$(patsubst %.o,%.d,${OBJECTS_STRANGE}))
@@ -146,7 +159,7 @@ ${LIB_OBJS_NORMAL}: ${OBJ}/%.o: %.c | create_dirs_and_headers
 
 ${EXELIST}: ${LIBLIST}
 
-${EXE}/teleproxy:	${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-proxy-stats.o ${OBJ}/src/mtproto/mtproto-proxy-http.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/mtproto-dc-probes.o ${OBJ}/src/mtproto/mtproto-check.o ${OBJ}/src/mtproto/mtproto-link.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o ${OBJ}/src/net/net-tcp-rpc-ext-drain.o ${OBJ}/src/net/net-tcp-rpc-ext-top-ips.o ${OBJ}/src/net/net-tcp-rpc-ext-uniq-bloom.o ${OBJ}/src/net/net-tcp-rpc-ext-domain.o ${OBJ}/src/net/net-ja4.o ${OBJ}/src/net/net-tcp-direct-dc.o
+${EXE}/teleproxy:	${OBJ}/src/mtproto/mtproto-proxy.o ${OBJ}/src/mtproto/mtproto-proxy-stats.o ${OBJ}/src/mtproto/mtproto-proxy-http.o ${OBJ}/src/mtproto/mtproto-config.o ${OBJ}/src/mtproto/mtbolt-config.o ${OBJ}/src/mtproto/ip-stats.o ${OBJ}/src/mtproto/mtproto-dc-table.o ${OBJ}/src/mtproto/mtproto-dc-probes.o ${OBJ}/src/mtproto/mtproto-check.o ${OBJ}/src/mtproto/mtproto-link.o ${OBJ}/src/net/net-tcp-rpc-ext-server.o ${OBJ}/src/net/net-tcp-rpc-ext-drain.o ${OBJ}/src/net/net-tcp-rpc-ext-top-ips.o ${OBJ}/src/net/net-tcp-rpc-ext-uniq-bloom.o ${OBJ}/src/net/net-tcp-rpc-ext-domain.o ${OBJ}/src/net/net-ja4.o ${OBJ}/src/net/net-tcp-direct-dc.o
 	${CC} -o $@ $^ ${LDFLAGS}
 
 ${LIB}/libkdb.a: ${LIB_OBJS}

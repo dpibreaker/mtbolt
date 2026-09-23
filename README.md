@@ -1,4 +1,16 @@
-# Teleproxy
+# MTBolt
+
+MTBolt tracks [Teleproxy](https://github.com/teleproxy/teleproxy) and includes
+[kavore's X25519MLKEM768 fake-TLS work](https://github.com/kavore/teleproxy/commits/fix/serverhello-mlkem-keyshare).
+Its additional features are shared-memory unique-IP/GeoIP metrics, high-load
+runtime tuning, dynamic connection tables, and optional DD + EE on one listener.
+See [mtbolt.toml.example](mtbolt.toml.example) for the added TOML settings.
+GeoIP requires `libmaxminddb` at build time and an operator-supplied City MMDB;
+without the database, country and region labels remain unknown. The bundled
+Docker image does not enable GeoIP unless rebuilt with that library.
+
+The documentation below is inherited from upstream Teleproxy; upstream-hosted
+deployment and release links do not publish MTBolt builds.
 
 [![CI](https://github.com/teleproxy/teleproxy/actions/workflows/test.yml/badge.svg)](https://github.com/teleproxy/teleproxy/actions/workflows/test.yml)
 [![Docker](https://img.shields.io/badge/docker-ghcr.io-blue?logo=docker)](https://github.com/teleproxy/teleproxy/pkgs/container/teleproxy)
@@ -75,7 +87,7 @@ Telegram WebView -> HTTPS frontend -> tproxy-server -> MTProxy backend -> Telegr
 Teleproxy can serve as the MTProxy backend: `tproxy-server` forwards the standard obfs2 or padded MTProxy stream unchanged. The WEB transport is handled by the relay and HTTPS frontend. When using Teleproxy as the backend:
 
 - Keep the backend listener private and use the same base 16-byte secret in the relay and Teleproxy. WEB clients accept plain or `dd`-prefixed secrets, not fake-TLS `ee` secrets.
-- Use a dedicated backend without `EE_DOMAIN` / `-D`, which enables TLS-only ingress. The public HTTPS connection terminates at the frontend.
+- Use a dedicated backend without `EE_DOMAIN` / `-D` unless `-R` / `random_padding_only = true` is also enabled. With both options, MTBolt accepts padded DD and fake-TLS EE on one listener. The public HTTPS connection terminates at the frontend.
 - Leave `PROXY_PROTOCOL` disabled: the reference relay sends raw MTProxy bytes without a PROXY header. Backend IP-based limits and statistics therefore see the relay address, not individual users.
 
 The public TLS handshake comes from the browser engine rather than Telegram's fake-TLS implementation. A compatible HTTPS frontend can also negotiate [Encrypted Client Hello (ECH)](https://www.rfc-editor.org/rfc/rfc9849.html) to hide the inner hostname, and [TLS certificate compression](https://www.rfc-editor.org/rfc/rfc8879.html) to reduce full-handshake certificate bytes. These require client support; ECH also requires the client to obtain the server's ECH configuration. Neither hides the server IP or guarantees access through a blocked network.

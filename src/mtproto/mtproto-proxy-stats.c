@@ -34,6 +34,7 @@
 #include "mtproto-proxy-stats.h"
 #include "qrcode/qrcodegen.h"
 #include "common/toml-config.h"
+#include "ip-stats.h"
 
 #ifndef COMMIT
 #define COMMIT "unknown"
@@ -1121,6 +1122,7 @@ void mtfront_prepare_prometheus_stats (stats_buffer_t *sb) {
   dc_probes_write_prometheus (sb);
   ja4_dump_prometheus (sb);
   dump_secret_ja4_prometheus (sb);
+  ip_stats_prometheus (sb, 0);
 
 #undef S
 #undef S1
@@ -1165,6 +1167,23 @@ static void format_ipv4 (char *buf, int bufsz, unsigned ip) {
 }
 
 unsigned parse_text_ipv4 (char *str);
+
+static void render_link_card (stats_buffer_t *sb, const char *server, int port,
+                              const char *secret_hex, const char *label,
+                              const char *mode) {
+  char url[2048], tg_url[2048];
+  snprintf (url, sizeof (url), "https://t.me/proxy?server=%s&port=%d&secret=%s",
+            server, port, secret_hex);
+  snprintf (tg_url, sizeof (tg_url), "tg://proxy?server=%s&port=%d&secret=%s",
+            server, port, secret_hex);
+  sb_printf (sb, "<div class=\"card\">\n");
+  if (label[0] && mode[0]) sb_printf (sb, "<div class=\"label\">%s · %s</div>\n", label, mode);
+  else if (label[0]) sb_printf (sb, "<div class=\"label\">%s</div>\n", label);
+  else if (mode[0]) sb_printf (sb, "<div class=\"label\">%s</div>\n", mode);
+  sb_printf (sb, "<a href=\"%s\">", tg_url);
+  sb_qr_svg (sb, url);
+  sb_printf (sb, "</a>\n<a class=\"url\" href=\"%s\">%s</a>\n</div>\n", tg_url, url);
+}
 
 void mtfront_prepare_link_page (stats_buffer_t *sb,
                                 const char *host, int host_len) {
@@ -1255,7 +1274,17 @@ void mtfront_prepare_link_page (stats_buffer_t *sb,
         if (w < 0 || w >= rem) break;
         pos += w;
       }
-    } else if (toml_cfg.random_padding_only == 1) {
+      render_link_card (sb, server, port, secret_hex, toml_cfg.secrets[i].label, "EE");
+      if (tcp_rpcs_get_ext_rand_pad_only ()) {
+        pos = snprintf (secret_hex, sizeof (secret_hex), "dd");
+        for (int j = 0; j < 16; j++) {
+          pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos,
+                           "%02x", toml_cfg.secrets[i].key[j]);
+        }
+        render_link_card (sb, server, port, secret_hex, toml_cfg.secrets[i].label, "DD");
+      }
+      continue;
+    } else if (tcp_rpcs_get_ext_rand_pad_only ()) {
       pos += snprintf (secret_hex + pos, sizeof (secret_hex) - pos, "dd");
       for (int j = 0; j < 16; j++) {
         int rem = (int)sizeof (secret_hex) - pos;
@@ -1276,25 +1305,8 @@ void mtfront_prepare_link_page (stats_buffer_t *sb,
       }
     }
 
-    char url[2048];
-    snprintf (url, sizeof (url),
-              "https://t.me/proxy?server=%s&port=%d&secret=%s",
-              server, port, secret_hex);
-
-    char tg_url[2048];
-    snprintf (tg_url, sizeof (tg_url),
-              "tg://proxy?server=%s&port=%d&secret=%s",
-              server, port, secret_hex);
-
-    sb_printf (sb, "<div class=\"card\">\n");
-    if (toml_cfg.secrets[i].label[0]) {
-      sb_printf (sb, "<div class=\"label\">%s</div>\n", toml_cfg.secrets[i].label);
-    }
-    sb_printf (sb, "<a href=\"%s\">", tg_url);
-    sb_qr_svg (sb, url);
-    sb_printf (sb, "</a>\n");
-    sb_printf (sb, "<a class=\"url\" href=\"%s\">%s</a>\n", tg_url, url);
-    sb_printf (sb, "</div>\n");
+    render_link_card (sb, server, port, secret_hex, toml_cfg.secrets[i].label,
+                      tcp_rpcs_get_ext_rand_pad_only () ? "DD" : "");
   }
 
   if (n == 0) {

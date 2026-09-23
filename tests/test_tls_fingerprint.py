@@ -395,6 +395,71 @@ def test_server_hello_tls13_compliance():
           f"key_share=x25519, encrypted={enc_len} bytes")
 
 
+def test_server_hello_mlkem_key_share():
+    """A hybrid ClientHello must get a matching 1120-byte ML-KEM share."""
+    host = os.environ.get("TELEPROXY_HOST", "teleproxy")
+    port = int(os.environ.get("TELEPROXY_PORT", "8443"))
+    secret_bytes = bytes.fromhex(os.environ["TELEPROXY_SECRET"])
+    domain = os.environ.get("EE_DOMAIN", os.environ.get("TLS_BACKEND_HOST", "172.30.0.10"))
+
+    hello = build_client_hello(domain)
+    old_share = b"\x00\x1d\x00\x20"
+    ext_start = hello.index(b"\x00\x33\x00\x2b\x00\x29")
+    assert hello[ext_start + 11:ext_start + 15] == old_share, "fixture key_share layout changed"
+    hybrid_share = b"\x11\xec\x04\x60" + os.urandom(1120)
+    new_ext = b"\x00\x33" + struct.pack(">H", 2 + len(hybrid_share))
+    new_ext += struct.pack(">H", len(hybrid_share)) + hybrid_share
+    hello[ext_start:ext_start + 47] = new_ext
+    extra = len(new_ext) - 47
+    struct.pack_into(">H", hello, 3, len(hello) - 5)
+    hello[6:9] = (len(hello) - 9).to_bytes(3, "big")
+    ext_len_pos = 78 + struct.unpack_from(">H", hello, 76)[0] + 2
+    struct.pack_into(">H", hello, ext_len_pos, 401 + extra)
+
+    hello_zeroed = bytearray(hello)
+    hello_zeroed[11:43] = bytes(32)
+    expected = hmac_mod.new(secret_bytes, hello_zeroed, hashlib.sha256).digest()
+    ts = struct.pack("<I", int(time.time()))
+    hello[11:43] = expected[:28] + bytes(a ^ b for a, b in zip(ts, expected[28:]))
+
+    with socket.create_connection((host, port), timeout=10) as sock:
+        sock.settimeout(5)
+        sock.sendall(hello)
+        data = bytearray()
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                chunk = sock.recv(16384)
+                if not chunk:
+                    break
+                data.extend(chunk)
+                if len(data) >= 5:
+                    sh_end = 5 + struct.unpack_from(">H", data, 3)[0]
+                    if len(data) >= sh_end + 11:
+                        enc_len = struct.unpack_from(">H", data, sh_end + 9)[0]
+                        if len(data) >= sh_end + 11 + enc_len:
+                            break
+            except socket.timeout:
+                break
+
+    assert len(data) >= 1215, f"ML-KEM ServerHello too short: {len(data)} bytes"
+    assert data[:3] == b"\x16\x03\x03", f"not ServerHello: {data[:8].hex()}"
+    assert struct.unpack_from(">H", data, 3)[0] == 1210, f"record length: {data[3:5].hex()}"
+    assert struct.unpack_from(">H", data, 79)[0] == 1134, f"extensions length: {data[79:81].hex()}"
+    exts = {}
+    pos = 81
+    while pos < 1215:
+        ext_id, ext_size = struct.unpack_from(">HH", data, pos)
+        exts[ext_id] = data[pos + 4:pos + 4 + ext_size]
+        pos += 4 + ext_size
+    assert pos == 1215, f"extension boundary: {pos}"
+    assert exts.get(0x33, b"")[:4] == b"\x11\xec\x04\x60", \
+        f"key_share: {exts.get(0x33, b'').hex()[:16]}"
+    assert len(exts[0x33]) == 1124, f"key_share length: {len(exts[0x33])}"
+    assert _verify_server_hmac(data, bytes(hello[11:43]), secret_bytes), "ServerHello HMAC mismatch"
+    print("  X25519MLKEM768 ServerHello key_share and record lengths OK")
+
+
 def test_encrypted_data_entropy():
     """Verify fake encrypted records have high Shannon entropy.
 
@@ -456,6 +521,7 @@ def main():
 
     proxy_tests = [
         ("test_server_hello_tls13_compliance", test_server_hello_tls13_compliance),
+        ("test_server_hello_mlkem_key_share", test_server_hello_mlkem_key_share),
         ("test_encrypted_data_entropy", test_encrypted_data_entropy),
     ]
 

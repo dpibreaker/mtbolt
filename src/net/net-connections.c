@@ -1605,6 +1605,10 @@ void tcp_set_max_connections (int maxconn) /* {{{ */ {
 }
 /* }}} */
 
+int tcp_get_max_connections (void) {
+  return max_connection_fd;
+}
+
 int create_all_outbound_connections_limited (int limit) /* {{{ */ {
   return 0;
   /*int count = 0;

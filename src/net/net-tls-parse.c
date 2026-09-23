@@ -260,6 +260,7 @@ int tls_client_hello_offers_mlkem (const unsigned char *client_hello, int len) {
       while (p + 4 <= ks_end) {
         int group = tls_read_length (client_hello, &p);
         int klen = tls_read_length (client_hello, &p);
+        if (klen > ks_end - p) return 0;
         if (group == 0x11ec) return 1;
         p += klen;
       }

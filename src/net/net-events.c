@@ -30,6 +30,7 @@
 #include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include "mtproto/mtbolt-config.h"
 #include <pwd.h>
 #include <signal.h>
 #include <stdio.h>
@@ -643,6 +644,14 @@ int server_socket (int port, struct in_addr in_addr, int backlog, int mode) {
       close (socket_fd);
       return -1;
     }
+  }
+  if (!(mode & SM_UDP) && mtbolt_cfg.tcp_defer_accept > 0) {
+#ifdef TCP_DEFER_ACCEPT
+    int timeout = mtbolt_cfg.tcp_defer_accept;
+    if (setsockopt (socket_fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &timeout, sizeof (timeout)) < 0) {
+      vkprintf (1, "TCP_DEFER_ACCEPT on socket #%d failed: %m\n", socket_fd);
+    }
+#endif
   }
   if (!(mode & SM_UDP) && listen (socket_fd, backlog) == -1) {
 //    perror("listen()");

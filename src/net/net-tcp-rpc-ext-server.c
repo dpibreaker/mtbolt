@@ -40,6 +40,7 @@
 #include <openssl/rand.h>
 
 #include "common/ip-utils.h"
+#include "mtproto/mtbolt-config.h"
 #include "common/kprintf.h"
 #include "common/precise-time.h"
 #include "common/resolver.h"
@@ -61,6 +62,7 @@
 #include "net/net-ip-acl.h"
 #include "net/net-thread.h"
 #include "mtproto/mtproto-dc-table.h"
+#include "mtproto/ip-stats.h"
 
 #include "vv/vv-io.h"
 
@@ -505,12 +507,23 @@ void tcp_rpcs_set_ext_rand_pad_only(int set) {
   ext_rand_pad_only = set;
 }
 
+int tcp_rpcs_get_ext_rand_pad_only(void) {
+  return ext_rand_pad_only;
+}
+
 /* tcp_rpcs_pin_ext_secrets, tcp_rpcs_reload_ext_secrets and the
    tcp_rpcs_drain_* helpers live in net-tcp-rpc-ext-drain.c — they need
    shared write access to the ext_secret_* state defined above and were
    moved out to keep this file under the LLM-friendly file-size cap. */
 
 int allow_only_tls;
+
+/* -D by itself stays TLS-only.  With -R, the same listener accepts both
+   Fake-TLS (EE) and random-padding obfs2 (DD); the obfs2 parser still
+   rejects unpadded transports. */
+static inline int tls_transport_is_strict_only (void) {
+  return allow_only_tls && !ext_rand_pad_only;
+}
 struct domain_info *default_domain_info;
 struct domain_info *domains[DOMAIN_HASH_MOD];
 struct domain_info *wildcard_domains;
@@ -1359,7 +1372,7 @@ int tcp_rpcs_ext_init_accepted (connection_job_t C) {
   if (proxy_protocol_enabled) {
     CONN_INFO(C)->flags |= C_PROXY_PROTOCOL;
   }
-  job_timer_insert (C, precise_now + 10);
+  job_timer_insert (C, precise_now + mtbolt_cfg.handshake);
   return tcp_rpcs_init_accepted_nohs (C);
 }
 
@@ -1420,6 +1433,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         }
         c->flags &= ~C_PROXY_PROTOCOL;
         proxy_protocol_connections_total++;
+        uint32_t accepted_ip = c->remote_ip;
         if (pp.family == AF_INET) {
           c->remote_ip = pp.src_ip;
           memset (c->remote_ipv6, 0, 16);
@@ -1433,6 +1447,10 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         }
         /* family==0 (UNKNOWN/LOCAL): keep original IP */
         if (pp.family) {
+          /* The accepted socket was counted before PROXY rewrote its peer.
+             Move the live-IP count so close() decrements the same address. */
+          ip_stats_disconnect (accepted_ip);
+          ip_stats_connect (c->remote_ip);
           int acl_ok = c->remote_ip
             ? ip_acl_check_v4 (c->remote_ip)
             : ip_acl_check_v6 (c->remote_ipv6);
@@ -1675,7 +1693,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             assert (pos + 8 + key_share_len <= response_size);
             if (use_mlkem) {
               memcpy (response_buffer + pos, "\x00\x33\x04\x64\x11\xec\x04\x60", 8);
-              RAND_bytes (response_buffer + pos + 8, 1088);
+              assert (RAND_bytes (response_buffer + pos + 8, 1088) == 1);
               generate_public_key (response_buffer + pos + 8 + 1088);
             } else {
               memcpy (response_buffer + pos, "\x00\x33\x00\x24\x00\x1d\x00\x20", 8);
@@ -1683,7 +1701,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             }
             pos += 8 + key_share_len;
           } else if (tls_server_extensions[i] == 0x2b) {
-            assert (pos + 5 <= response_size);
+            assert (pos + 6 <= response_size);
             memcpy (response_buffer + pos, "\x00\x2b\x00\x02\x03\x04", 6);
             pos += 6;
           } else {
@@ -1722,7 +1740,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
         return 11; // waiting for dummy ChangeCipherSpec and first packet
       }
 
-      if (allow_only_tls && !(c->flags & C_IS_TLS)) {
+      if (tls_transport_is_strict_only () && !(c->flags & C_IS_TLS)) {
         vkprintf (1, "Expected TLS-transport\n");
         RETURN_TLS_ERROR(default_domain_info);
       }
@@ -1777,7 +1795,7 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
           unsigned tag = pr.tag;
           int secret_id = compact_to_slot[pr.secret_id];
 
-          if (tag != OBFS2_TAG_PAD && allow_only_tls) {
+          if (tag != OBFS2_TAG_PAD && tls_transport_is_strict_only ()) {
             vkprintf (1, "Expected random padding mode\n");
             RETURN_TLS_ERROR(default_domain_info);
           }
@@ -1868,6 +1886,12 @@ int tcp_rpcs_compact_parse_execute (connection_job_t C) {
             ip_track_connect (_sid - 1, c->remote_ip, c->remote_ipv6);
             tcp_rpcs_account_connect (_sid - 1, c->remote_ip, c->remote_ipv6);
           }
+        }
+
+        if (c->flags & C_IS_TLS) {
+          ip_stats_transport_seen (c->remote_ip, IP_STATS_TRANSPORT_EE);
+        } else if ((unsigned) D->extra_int3 == OBFS2_TAG_PAD) {
+          ip_stats_transport_seen (c->remote_ip, IP_STATS_TRANSPORT_DD);
         }
 
         /* Activate DRS for TLS connections */

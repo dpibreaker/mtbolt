@@ -35,6 +35,7 @@
 #include "mtproto-common.h"
 #include "mtproto-proxy-stats.h"
 #include "mtproto-proxy-http.h"
+#include "ip-stats.h"
 
 #define	MAX_POST_SIZE	(262144 * 4 - 4096)
 
@@ -49,6 +50,7 @@ extern char cur_http_origin[1024], cur_http_referer[1024], cur_http_user_agent[1
 extern int cur_http_origin_len, cur_http_referer_len, cur_http_user_agent_len;
 
 extern long long per_secret_connections[];
+extern int ext_connection_table_capacity (void);
 
 int check_conn_buffers (connection_job_t c);
 void lru_insert_conn (connection_job_t c);
@@ -109,7 +111,7 @@ int do_close_in_ext_conn (void *_data, int s_len) {
 
 // NET_CPU context
 int mtproto_http_close (connection_job_t C, int who) {
-  assert ((unsigned) CONN_INFO(C)->fd < MAX_CONNECTIONS);
+  assert ((unsigned) CONN_INFO(C)->fd < (unsigned) ext_connection_table_capacity ());
   vkprintf (3, "http connection closing (%d) by %d, %d queries pending\n", CONN_INFO(C)->fd, who, CONN_INFO(C)->pending_queries);
   if (CONN_INFO(C)->pending_queries) {
     assert (CONN_INFO(C)->pending_queries == 1);
@@ -121,18 +123,20 @@ int mtproto_http_close (connection_job_t C, int who) {
 }
 
 int mtproto_ext_rpc_ready (connection_job_t C) {
-  assert ((unsigned) CONN_INFO(C)->fd < MAX_CONNECTIONS);
+  assert ((unsigned) CONN_INFO(C)->fd < (unsigned) ext_connection_table_capacity ());
   vkprintf (3, "ext_rpc connection ready (%d)\n", CONN_INFO(C)->fd);
   /* Per-secret increment is NOT done here — this callback fires at connection
      acceptance, before the handshake identifies the secret (extra_int2 = 0).
      The increment happens in tcp_rpcs_compact_parse_execute after handshake. */
+  ip_stats_connect (CONN_INFO(C)->remote_ip);
   lru_insert_conn (C);
   return 0;
 }
 
 int mtproto_ext_rpc_close (connection_job_t C, int who) {
-  assert ((unsigned) CONN_INFO(C)->fd < MAX_CONNECTIONS);
+  assert ((unsigned) CONN_INFO(C)->fd < (unsigned) ext_connection_table_capacity ());
   vkprintf (3, "ext_rpc connection closing (%d) by %d\n", CONN_INFO(C)->fd, who);
+  ip_stats_disconnect (CONN_INFO(C)->remote_ip);
   int sid = TCP_RPC_DATA(C)->extra_int2;
   if (sid > 0 && sid <= EXT_SECRET_MAX_SLOTS) {
     per_secret_connections[sid - 1]--;
@@ -649,7 +653,7 @@ int http_send_message (JOB_REF_ARG (C), struct tl_in_state *tlio_in, int flags) 
 
   assert (CONN_INFO(C)->status == conn_working && CONN_INFO(C)->pending_queries == 1);
 
-  assert ((unsigned) CONN_INFO(C)->fd < MAX_CONNECTIONS);
+  assert ((unsigned) CONN_INFO(C)->fd < (unsigned) ext_connection_table_capacity ());
   vkprintf (3, "detaching http connection (%d)\n", CONN_INFO(C)->fd);
 
   struct ext_connection *Ex = get_ext_connection_by_in_fd (CONN_INFO(C)->fd);

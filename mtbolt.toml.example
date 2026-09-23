@@ -1,0 +1,44 @@
+# MTBolt configuration (Teleproxy 4.16.1 base)
+# Replace example.com and the secret before starting. See docs/deployment/toml.md.
+port = 443
+# Stats are disabled by default. If enabled, restrict access with stats_allow_net.
+# stats_port = 8888
+# http_stats = true
+# stats_allow_net = ["127.0.0.1/32"]
+direct = true
+domain = "example.com"
+random_padding_only = true # DD and EE on the same listener
+
+[[secret]]
+key = "0123456789abcdef0123456789abcdef"
+label = "example"
+
+# The nested sections below are MTBolt-specific. Uncomment only needed values.
+# CLI and flat Teleproxy values take precedence where they overlap.
+
+[network]
+# max_connections = 10485760    # Process connection/file-descriptor cap (flat maxconn)
+# backlog = 131072               # listen() backlog queue size
+# tcp_defer_accept = 0           # Optional; defers accepting silent sockets (0 = disable)
+# window_clamp = 131072          # TCP window clamp for client connections
+
+[buffers]
+# max_allocated_bytes = 17179869184  # 16GB — max memory for message buffer pool
+# max_connection_buffer = 33554432   # 32MB — per-connection buffer limit
+
+[timeouts]
+# handshake = 5.0        # MTProto handshake timeout (seconds)
+# ping_interval = 5.0    # Keepalive ping interval (seconds)
+# http_max_wait = 960.0  # HTTP long-poll max wait (seconds)
+
+[geoip]
+# enabled = true
+# database = "/etc/geoip/GeoLite2-City.mmdb"
+# ht_size = 4194304      # Hash table slots for IP tracking (must be power of 2)
+# max_regions = 128      # Max tracked sub-country regions
+
+[workers]
+# count = 0              # Worker processes (0 = single process, -M flag equivalent)
+
+[stats]
+# http_enabled = false   # Enable HTTP stats endpoint (--http-stats equivalent)

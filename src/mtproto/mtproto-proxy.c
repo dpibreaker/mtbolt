@@ -76,6 +76,8 @@
 #include "common/toml-config.h"
 #include "mtproto-proxy-stats.h"
 #include "mtproto-proxy-http.h"
+#include "mtbolt-config.h"
+#include "ip-stats.h"
 
 #ifndef COMMIT
 #define COMMIT "unknown"
@@ -102,7 +104,7 @@ const char FullVersionStr[] = VERSION_STR " compiled at " __DATE__ " " __TIME__ 
 
 #define	MAX_HTTP_LISTEN_PORTS	128
 
-#define	HTTP_MAX_WAIT_TIMEOUT	960.0
+#define	HTTP_MAX_WAIT_TIMEOUT	(mtbolt_cfg.http_max_wait)
 
 #define PING_INTERVAL 5.0
 #define STOP_INTERVAL (2 * ping_interval)
@@ -120,7 +122,7 @@ const char FullVersionStr[] = VERSION_STR " compiled at " __DATE__ " " __TIME__ 
 #define	MAX_CONNECTION_BUFFER_SPACE	(1 << 10) //(1 << 25)
 #define MAX_MTFRONT_NB			1 //((NB_max * 3) >> 2)
 #else
-#define	MAX_CONNECTION_BUFFER_SPACE	(1 << 25)
+#define	MAX_CONNECTION_BUFFER_SPACE	(mtbolt_cfg.max_connection_buffer)
 #define MAX_MTFRONT_NB			((NB_max * 3) >> 2)
 #endif
 
@@ -132,6 +134,7 @@ int proxy_mode;
 int direct_mode;
 int ipv6_enabled;
 static int dc_probe_interval_from_cli = -1;
+static char geoip_db_cli[512];
 
 #define IS_PROXY_IN	0
 #define IS_PROXY_OUT	1
@@ -222,7 +225,22 @@ long long per_secret_drain_forced[EXT_SECRET_MAX_SLOTS];
 
 struct ext_connection_ref OutExtConnections[EXT_CONN_TABLE_SIZE];
 struct ext_connection *InExtConnectionHash[EXT_CONN_HASH_SIZE];
-struct ext_connection ExtConnectionHead[MAX_CONNECTIONS];
+static struct ext_connection *ExtConnectionHead;
+static int ext_conn_table_size;
+
+int ext_connection_table_capacity (void) {
+  return ext_conn_table_size;
+}
+
+static void ext_connection_table_init (void) {
+  ext_conn_table_size = tcp_get_max_connections ();
+  if (ext_conn_table_size <= 0) ext_conn_table_size = MAX_CONNECTIONS;
+  ExtConnectionHead = calloc ((size_t) ext_conn_table_size, sizeof (*ExtConnectionHead));
+  if (!ExtConnectionHead) {
+    kprintf ("cannot allocate ext_connection table for %d fds\n", ext_conn_table_size);
+    exit (1);
+  }
+}
 
 void lru_delete_ext_conn (struct ext_connection *Ext);
 
@@ -239,7 +257,7 @@ static inline int ext_conn_hash (int in_fd, long long in_conn_id) {
 // returns the only ext_connection with given in_fd
 struct ext_connection *get_ext_connection_by_in_fd (int in_fd) {
   check_engine_class ();
-  assert ((unsigned) in_fd < MAX_CONNECTIONS);
+  assert ((unsigned) in_fd < (unsigned) ext_conn_table_size);
   struct ext_connection *H = &ExtConnectionHead[in_fd];
   struct ext_connection *Ex = H->i_next;
   assert (H->i_next == H->i_prev);
@@ -300,7 +318,7 @@ struct ext_connection *get_ext_connection_by_in_conn_id (int in_fd, int in_gen, 
   cur->in_fd = in_fd;
   cur->in_gen = in_gen;
   cur->in_conn_id = in_conn_id;
-  assert ((unsigned) in_fd < MAX_CONNECTIONS);
+  assert ((unsigned) in_fd < (unsigned) ext_conn_table_size);
   if (in_fd) {
     struct ext_connection *H = &ExtConnectionHead[in_fd];
     if (!H->i_next) {
@@ -344,7 +362,7 @@ struct ext_connection *create_ext_connection (connection_job_t CI, long long in_
   struct ext_connection *Ex = get_ext_connection_by_in_conn_id (CONN_INFO(CI)->fd, CONN_INFO(CI)->generation, in_conn_id, 2, 0);
   assert (Ex && "ext_connection already exists");
   assert (!Ex->out_fd && !Ex->o_next && !Ex->auth_key_id);
-  assert (!CO || (unsigned) CONN_INFO(CO)->fd < MAX_CONNECTIONS);
+  assert (!CO || (unsigned) CONN_INFO(CO)->fd < (unsigned) ext_conn_table_size);
   assert (CO != CI);
   if (CO) {
     struct ext_connection *H = &ExtConnectionHead[CONN_INFO(CO)->fd];
@@ -367,7 +385,7 @@ void remove_ext_connection (struct ext_connection *Ex, int send_notifications) {
   assert (Ex->out_conn_id);
   assert (Ex == find_ext_connection_by_out_conn_id (Ex->out_conn_id));
   if (Ex->out_fd) {
-    assert ((unsigned) Ex->out_fd < MAX_CONNECTIONS);
+    assert ((unsigned) Ex->out_fd < (unsigned) ext_conn_table_size);
     assert (Ex->o_next);
     if (send_notifications & 1) {
       connection_job_t CO = connection_get_by_fd_generation (Ex->out_fd, Ex->out_gen);
@@ -377,7 +395,7 @@ void remove_ext_connection (struct ext_connection *Ex, int send_notifications) {
     }
   }
   if (Ex->in_fd) {
-    assert ((unsigned) Ex->in_fd < MAX_CONNECTIONS);
+    assert ((unsigned) Ex->in_fd < (unsigned) ext_conn_table_size);
     assert (Ex->i_next);
     if (send_notifications & 2) {
       connection_job_t CI = connection_get_by_fd_generation (Ex->in_fd, Ex->in_gen);
@@ -652,7 +670,7 @@ int mtfront_client_ready (connection_job_t C) {
   check_engine_class ();
   struct tcp_rpc_data *D = TCP_RPC_DATA(C);
   int fd = CONN_INFO(C)->fd;
-  assert ((unsigned) fd < MAX_CONNECTIONS);
+  assert ((unsigned) fd < (unsigned) ext_conn_table_size);
   assert (!D->extra_int);
   D->extra_int = get_conn_tag (C);
   vkprintf (1, "Connected to RPC Middle-End (fd=%d)\n", fd);
@@ -671,7 +689,7 @@ int mtfront_client_close (connection_job_t C, int who) {
   check_engine_class ();
   struct tcp_rpc_data *D = TCP_RPC_DATA(C);
   int fd = CONN_INFO(C)->fd;
-  assert ((unsigned) fd < MAX_CONNECTIONS);
+  assert ((unsigned) fd < (unsigned) ext_conn_table_size);
   vkprintf (1, "Disconnected from RPC Middle-End (fd=%d)\n", fd);
   if (D->extra_int) {
     assert (D->extra_int == get_conn_tag (C));
@@ -698,7 +716,7 @@ int mtproto_proxy_rpc_ready (connection_job_t C) {
   check_engine_class ();
   struct tcp_rpc_data *D = TCP_RPC_DATA(C);
   int fd = CONN_INFO(C)->fd;
-  assert ((unsigned) fd < MAX_CONNECTIONS);
+  assert ((unsigned) fd < (unsigned) ext_conn_table_size);
   vkprintf (3, "proxy_rpc connection ready (%d)\n", fd);
   struct ext_connection *H = &ExtConnectionHead[fd];
   assert (!H->i_prev);
@@ -714,7 +732,7 @@ int mtproto_proxy_rpc_close (connection_job_t C, int who) {
   check_engine_class ();
   struct tcp_rpc_data *D = TCP_RPC_DATA(C);
   int fd = CONN_INFO(C)->fd;
-  assert ((unsigned) fd < MAX_CONNECTIONS);
+  assert ((unsigned) fd < (unsigned) ext_conn_table_size);
   vkprintf (3, "proxy_rpc connection closing (%d) by %d\n", fd, who);
   if (D->extra_int) {
     assert (D->extra_int == -get_conn_tag (C));
@@ -830,7 +848,7 @@ int forward_tcp_query (struct tl_in_state *tlio_in, connection_job_t c, conn_tar
   }
 
   if (Ex) {
-    assert (Ex->out_fd > 0 && Ex->out_fd < MAX_CONNECTIONS);
+    assert (Ex->out_fd > 0 && Ex->out_fd < ext_conn_table_size);
     d = connection_get_by_fd_generation (Ex->out_fd, Ex->out_gen);
     if (!d || !CONN_INFO(d)->target) {
       if (d) {
@@ -1202,7 +1220,7 @@ void mtfront_pre_loop (void) {
   if (domain_count == 0) {
     tcp_maximize_buffers = 1;
     if (window_clamp == 0) {
-      window_clamp = DEFAULT_WINDOW_CLAMP;
+      window_clamp = mtbolt_cfg.window_clamp;
     }
   }
   if (!workers) {
@@ -1565,6 +1583,9 @@ int f_parse_option (int val) {
   case 2011:
     toml_cfg.ja4_log = 1;
     break;
+  case 2110:
+    snprintf (geoip_db_cli, sizeof (geoip_db_cli), "%s", optarg);
+    break;
   default:
     return -1;
   }
@@ -1575,14 +1596,14 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("http-stats", no_argument, 0, 2000, "allow http server to answer on stats queries");
   parse_option ("mtproto-secret", required_argument, 0, 'S', "16-byte secret in hex, optionally :LABEL:LIMIT (e.g. -S abcdef01234567890abcdef012345678:myapp:1000)");
   parse_option ("proxy-tag", required_argument, 0, 'P', "16-byte proxy tag in hex mode to be passed along with all forwarded queries");
-  parse_option ("domain", required_argument, 0, 'D', "adds allowed domain or host:port for TLS-transport mode, disables other transports; can be specified more than once");
+  parse_option ("domain", required_argument, 0, 'D', "adds fake-TLS domain; with -R also accepts DD on the same listener (repeatable)");
   parse_option ("max-special-connections", required_argument, 0, 'C', "sets maximal number of accepted client connections per worker");
   parse_option ("window-clamp", required_argument, 0, 'W', "sets window clamp for client TCP connections");
   parse_option ("http-ports", required_argument, 0, 'H', "comma-separated list of client (HTTP) ports to listen");
   // parse_option ("outbound-connections-ps", required_argument, 0, 'o', "limits creation rate of outbound connections to mtproto-servers (default %d)", DEFAULT_OUTBOUND_CONNECTION_CREATION_RATE);
   parse_option ("slaves", required_argument, 0, 'M', "spawn several slave workers; not recommended for TLS-transport mode for better replay protection");
   parse_option ("ping-interval", required_argument, 0, 'T', "sets ping interval in second for local TCP connections (default %.3lf)", PING_INTERVAL);
-  parse_option ("random-padding-only", no_argument, 0, 'R', "allow only clients with random padding option enabled");
+  parse_option ("random-padding-only", no_argument, 0, 'R', "require DD for obfs2; with -D accepts DD and EE on one listener");
   parse_option ("ip-blocklist", required_argument, 0, 2001, "path to file with CIDR ranges to reject");
   parse_option ("ip-allowlist", required_argument, 0, 2002, "path to file with CIDR ranges to exclusively allow");
   parse_option ("direct", no_argument, 0, 2003, "connect directly to Telegram DCs instead of through ME relays (incompatible with -P)");
@@ -1594,6 +1615,7 @@ void mtfront_prepare_parse_options (void) {
   parse_option ("dc-probe-interval", required_argument, 0, 2009, "seconds between DC health probes (0=disabled, default 0)");
   parse_option ("no-mss-clamp", no_argument, 0, 2010, "disable automatic ClientHello fragmentation (default on; see DPI Resistance docs)");
   parse_option ("ja4-log", no_argument, 0, 2011, "log ja4=<hash> sni=<name> per ClientHello at verbose level 2 (top-N counter is always on)");
+  parse_option ("geoip-db", required_argument, 0, 2110, "MaxMind GeoLite2 City database for country and Russian-region metrics");
 }
 
 void mtfront_parse_extra_args (int argc, char *argv[]) /* {{{ */ {
@@ -1620,6 +1642,10 @@ void mtfront_pre_init (void) {
     char errbuf[512];
     if (toml_config_load (toml_config_path, &toml_cfg, errbuf, sizeof (errbuf)) < 0) {
       kprintf ("config file error: %s\n", errbuf);
+      exit (1);
+    }
+    if (mtbolt_config_load_toml (&mtbolt_cfg, toml_config_path, errbuf, sizeof (errbuf)) < 0) {
+      kprintf ("MTBolt config error: %s\n", errbuf);
       exit (1);
     }
     vkprintf (0, "loaded config from %s\n", toml_config_path);
@@ -1701,6 +1727,45 @@ void mtfront_pre_init (void) {
     }
   }
 
+  if (geoip_db_cli[0]) {
+    snprintf (mtbolt_cfg.geoip_database, sizeof (mtbolt_cfg.geoip_database), "%s", geoip_db_cli);
+    mtbolt_cfg.geoip_enabled = 1;
+  }
+  {
+    char errbuf[512];
+    if (mtbolt_config_validate (&mtbolt_cfg, errbuf, sizeof (errbuf)) < 0) {
+      kprintf ("MTBolt config error: %s\n", errbuf);
+      exit (1);
+    }
+  }
+
+  /* Flat Teleproxy options and CLI flags take precedence over MTBolt tuning. */
+  if (mtbolt_cfg.max_connections_set && !engine_state->maxconn_from_cli) {
+    set_maxconn (mtbolt_cfg.max_connections);
+    if (max_special_connections == MAX_CONNECTIONS && toml_cfg.max_connections <= 0) {
+      max_special_connections = mtbolt_cfg.max_connections;
+    }
+  }
+  if (mtbolt_cfg.backlog_set && engine_state->backlog == DEFAULT_BACKLOG) {
+    engine_set_backlog (mtbolt_cfg.backlog);
+  }
+  if (mtbolt_cfg.workers_set && toml_cfg.workers < 0 && workers == 0) {
+    workers = mtbolt_cfg.workers;
+  }
+  if (mtbolt_cfg.stats_http_enabled_set && mtbolt_cfg.stats_http_enabled &&
+      engine_state->do_not_open_port) {
+    engine_set_http_fallback (&ct_http_server, &http_methods_stats);
+    mtproto_front_functions.flags &= ~ENGINE_NO_PORT;
+    engine_state->do_not_open_port = 0;
+  }
+  if (ping_interval == PING_INTERVAL) {
+    ping_interval = mtbolt_cfg.ping_interval;
+  }
+  if (window_clamp == 0) {
+    window_clamp = mtbolt_cfg.window_clamp;
+  }
+  max_allocated_buffer_bytes = mtbolt_cfg.max_allocated_bytes;
+
   if (engine_state->port > 0 && engine_state->do_not_open_port) {
     kprintf ("warning: stats_port is set but http_stats is not enabled — stats port will not open\n");
   }
@@ -1716,6 +1781,7 @@ void mtfront_pre_init (void) {
   }
 
   init_ct_server_mtfront ();
+  ext_connection_table_init ();
 
   if (!direct_mode) {
     int res = do_reload_config (0x26);
@@ -1732,6 +1798,13 @@ void mtfront_pre_init (void) {
 
   if (ip_acl_reload () < 0) {
     kprintf ("failed to load IP ACL files\n");
+    exit (1);
+  }
+
+  ip_stats_init ();
+  if (mtbolt_cfg.geoip_enabled && mtbolt_cfg.geoip_database[0] &&
+      ip_stats_geoip_load (mtbolt_cfg.geoip_database) < 0) {
+    kprintf ("failed to load GeoIP database\n");
     exit (1);
   }
 
@@ -1903,6 +1976,7 @@ static int cmd_generate_secret (int argc, char *argv[]) {
 }
 
 int main (int argc, char *argv[]) {
+  mtbolt_config_defaults (&mtbolt_cfg);
   /* Subcommand dispatch — checked before engine init */
   if (argc >= 2 && !strcmp (argv[1], "check")) {
     return cmd_check (argc - 1, argv + 1);
